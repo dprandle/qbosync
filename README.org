@@ -1,0 +1,150 @@
+* qbosync
+
+A Node/TypeScript service that owns everything QuickBooks Online (QBO) for UberMail: the OAuth connection, background syncs (subcontractors → 1099 vendors today) and a loopback API for request/response features (expenses etc., later). It is the only process that talks to QBO. The UberMail desktop app knows nothing about QuickBooks, and zetrick-api is the public edge that forwards to it.
+
+#+begin_example
+Intuit redirect / Uber ──▶ zetrick-api (public, authenticates callers) ──▶ qbosync (127.0.0.1:3002)
+                                                                             ├─ OAuth + tokens (sole refresher)
+                                                                             ├─ sync loop: vendors, ...
+                                                                             └─ API routes: /oauth, ...
+#+end_example
+
+The sync side is modeled on [[https://github.com/dprandle/qbtsync][qbtsync]]: one sequential loop, delta cursors over =last_update.on=, a mapping collection, a separate one-time bootstrap per feature, and a periodic cleanup pass.
+
+** Layout
+
+| Path                    | What                                                                              |
+|-------------------------+-----------------------------------------------------------------------------------|
+| =src/index.ts=          | Startup, the =FEATURES= list and the sequential sync loop                         |
+| =src/api_server.ts=     | Loopback Fastify server; each feature registers its routes under a prefix         |
+| =src/qbo/auth.ts=       | OAuth flow, token file, refresh (the only refresher)                              |
+| =src/qbo/client.ts=     | Generic QBO client (=read=, =create=, =sparse_update=, =query=), error classification |
+| =src/qbo/rate_limiter.ts= | One sliding-window limiter shared by every feature                              |
+| =src/qbo/object_map.ts= | =qbo_object_map= mapping documents                                                |
+| =src/qbo/oauth_routes.ts= | =/oauth/*= routes zetrick-api forwards to                                       |
+| =src/vendors/=          | Vendor sync: field resolution (=subc.ts=), sync pass, cleanup, failures, bootstrap, preview |
+| =src/sync_state.ts=, =src/alerts.ts= | Persisted cursors/flags and SendGrid alerts, shared                  |
+
+*** Adding a feature
+
+- QBO calls: put entity helpers in =src/<feature>/<entity>_api.ts= on top of =qbo_client= (see =vendors/vendor_api.ts=), so they share the token, limiter and transient/permanent error handling.
+- Request/response endpoints: a Fastify plugin registered in =api_server.ts= under its own prefix, plus a forwarding route in zetrick-api (which does the caller auth).
+- Background work: add an entry to =FEATURES= in =index.ts= (=ready=, =sync=, optional =cleanup=), with its state under its own key in =sync_state.ts=.
+- Mappings: add the entity to =qbo_object_type= and reuse =qbo_object_map=.
+
+** OAuth
+
+qbosync holds the client secret and tokens and is the only process that refreshes them. Intuit rotates refresh tokens, so two refreshers would invalidate each other. Tokens live in =QBO_TOKEN_FILE= (mode 0600), deliberately not in MongoDB, which the desktop clients can read. The access token is refreshed 5 minutes before expiry or after an unexpected 401. A rejected refresh token (=invalid_grant=) pauses all QBO work and emails an alert to reconnect.
+
+Intuit needs a public redirect URL, so zetrick-api keeps the browser-facing =/quickbooks/*= routes and forwards them here, the same way it forwards invites to qbtsync:
+
+| qbosync route          | zetrick-api route          | Purpose                                             |
+|------------------------+----------------------------+-----------------------------------------------------|
+| =GET /oauth/connect_url= | =GET /quickbooks/connect=  | Fresh single-use state + Intuit authorize URL       |
+| =POST /oauth/callback=   | =GET /quickbooks/callback= | Validates state/realm, exchanges code, saves tokens |
+| =GET /oauth/status=      | =GET /quickbooks=          | Connection status for the launch page               |
+
+Optional =QBO_EXPECTED_REALM_ID= pins a deployment to one company (QBO's "realm" = company ID): the callback refuses any other company and QBO calls refuse a stored token for a different one. Sandbox vs production is already separated by Intuit's keys; this only guards against picking the wrong company when the connecting login can see several.
+
+** Vendors
+
+Every subcontractor gets one QBO vendor. Active subc → active vendor; archived subc → vendor =Active=false= (QBO can't delete vendors). Archived subcs that never had a vendor don't get one. Employees aren't synced; QuickBooks is only used for subcontractors.
+
+Vendor fields are resolved exactly the way uber's =get_sc_*= helpers do (=sc/subcontractor.cpp=): for each field, if the subc's matching =SC_ENTITY_FLAG_USE_OWNER_*= flag is set *and* the owner hresource exists, the owner's value is used; otherwise the subc's own. Docs missing =flags= get uber's default (=USE_OWNER_ALL=).
+
+| Vendor field                     | Source                                                                               |
+|----------------------------------+--------------------------------------------------------------------------------------|
+| =DisplayName=, =PrintOnCheckName= | owner "First Last" (=USE_OWNER_NAME=) or =subcontractor.name=                       |
+| =GivenName= / =FamilyName=       | owner first/last, when the name comes from the owner                                 |
+| =CompanyName=                    | =subcontractor.name=, when it doesn't                                                |
+| =TaxIdentifier=                  | owner =detail.SSN= (=USE_OWNER_SSN=) or =subcontractor.ein=                          |
+| =BillAddr=                       | mailing address, else physical (owner's =detail.mail/phys= with =USE_OWNER_ADDRESS=) |
+| =PrimaryEmailAddr=, =PrimaryPhone= | owner or subc, per =USE_OWNER_EMAIL= / =USE_OWNER_PHONE=                          |
+| =Vendor1099=                     | always =true=                                                                        |
+| =Active=                         | subc not archived                                                                    |
+
+Updates are sparse, so anything else on the vendor (terms, expense accounts, notes) stays under accounting's control. The fields above are owned by Uber: edits to them in QBO are overwritten on the subc's next change.
+
+*Required fields:* name, a 9-digit TIN, street address, city, state and zip. An incomplete subc is skipped *without* flooring the cursor; filling in the missing data bumps the subc (or its owner) and the next delta pass picks it up. A linked vendor whose subc becomes incomplete is left as-is rather than blanked out (archiving still goes through). =npm run preview_vendors= shows what's missing for each subc.
+
+*** Cursors
+
+Two delta cursors, both over =last_update.on=:
+
+- *subcontractor*: the subc itself changed.
+- *hresource*: an owner changed. An owner edit only bumps the hresource, but flows into every subc that pulls a field from that owner, so changed hresources are mapped to the subcs they own (=SC_WORKER_FLAG_OWNER=) that have any =USE_OWNER_*= flag set.
+
+A subc reached from either (or both) is processed once. A transient failure floors whichever cursor(s) brought it in, exactly like qbtsync (=safe_cursor=, =earliest_unresolved=), and a cursor floored on the same item for =CURSOR_FLOOR_ALERT_PASSES= passes emails an alert.
+
+*** Change detection
+
+Each mapping stores =synced_hash=: an HMAC (keyed with =SYNC_HASH_KEY=) of the exact vendor payload last pushed. An hresource/subc edit that doesn't touch a synced field produces the same hash and costs no QBO call. When it differs, the vendor is fetched (for its =SyncToken=) and sparse-updated. The hash is keyed because the mapping collection is readable by Uber clients and an unkeyed hash of a 9-digit TIN is trivially reversible. QBO masks =TaxIdentifier= on reads, so we never diff against the live vendor.
+
+*** Failures: transient vs permanent
+
+- *Transient* (network, 5xx, 429, auth, stale =SyncToken=): floors the cursor; retried next pass.
+- *Permanent* (QBO =ValidationFault=, e.g. a duplicate name; =DisplayName= must be unique across vendors, customers *and* employees): recorded in =sync_state.json= under =vendors.failures=, emailed, and the cursor moves on. It's retried whenever the subc or its owner changes, and once per cleanup window.
+
+A duplicate-name create is linked to the existing vendor instead of failing only when it's unambiguous: exact =DisplayName=, not linked to another subc, and the vendor's visible TIN last four digits match ours. That covers a crash between creating a vendor and saving its mapping, and accounting entering the vendor first.
+
+*** Orphan sweep
+
+Every pass also picks up active subcs with no mapping that the cursors won't revisit (a create that failed after its cursor moved, a mapping dropped by cleanup). It only touches Mongo unless a create is actually due, and can't silently duplicate a vendor because of QBO's unique-name rule.
+
+*** Cleanup
+
+Once per window (=MAPPING_CLEANUP_*=, daily by default):
+
+- Mapped vendor missing from QBO → drop the mapping (the sweep recreates it).
+- Subc hard-deleted (moved to =subcontractor-deleted=) → deactivate its vendor, drop the mapping.
+- Retry every recorded permanent failure.
+
+*** Bootstrap
+
+=npm run bootstrap_vendors= links the vendors already in QBO to subcs so the sync doesn't duplicate them. Matching is by normalized name against every name form a vendor may have (display/company/print-on-check, given+family in either order), with the visible TIN last-4 digits used to rule candidates out or confirm them: a unique TIN-confirmed match links automatically, a name-only match asks y/n, several candidates ask which one, and no match is left for the sync to create. Unmatched vendors are only listed, never archived. =--dry-run= matches and logs without writing.
+
+The vendor pass idles until bootstrap sets =vendors.bootstrap_complete=; the rest of the service (OAuth, API, other features) runs regardless.
+
+** Collections
+
+*** =qbo_object_map=
+
+| Field          | Description                                            |
+|----------------+--------------------------------------------------------|
+| =qbo_id=       | QBO entity =Id= (string)                               |
+| =our_id=       | Our document id (=subcontractor._id= for vendors)      |
+| =type=         | =vendor=                                               |
+| =synced_hash=  | HMAC of the last pushed payload; empty = never pushed  |
+| =qbo_modified= | =MetaData.LastUpdatedTime= after our last write        |
+
+Plus the standard UberMail envelope. Unique indexes on ={type, qbo_id}= and ={type, our_id}= are created on startup.
+
+*** =sync_state.json=
+
+Per-feature cursors, bootstrap flags and failures (=vendors=), cleanup =last_run=, and floor-alert streaks.
+
+** Setup
+
+#+begin_src sh
+npm install
+cp .env.example .env   # fill in; generate SYNC_HASH_KEY with: openssl rand -hex 32
+#+end_src
+
+Dev uses =QBO_ENV=sandbox= with the Intuit app's development keys and a sandbox company; there is no mock.
+
+*** First run (per deployment)
+
+1. Start the service (=npm run dev= / =npm start= / systemd).
+2. Connect: visit =https://<zetrick-api>/quickbooks/connect= and authorize the company.
+   - Or, to carry over the connection zetrick-api made before this service existed: copy =/var/lib/zetrick/quickbooks.json= to =QBO_TOKEN_FILE= (same format, =chmod 600=). The refresh token is still good as long as it hasn't expired; qbosync refreshes the access token on first use.
+3. =npm run preview_vendors=: see what each subc will become and what's missing.
+4. =npm run bootstrap_vendors -- --dry-run=, review, then =npm run bootstrap_vendors=.
+5. The running service notices the flag on its next tick and starts the vendor pass. The first pass pushes our data onto every linked vendor (their =synced_hash= starts empty): expect DisplayNames normalized to Uber's names, TINs and 1099 flags filled in.
+
+*** systemd
+
+Same layout as qbtsync: =deploy/qbosync.service= runs from =/root/qbosync=; =npm run deploy -- <remote>= pulls, installs and restarts; =journalctl -u qbosync -f=. Deploy qbosync before a zetrick-api that forwards to it, or =/quickbooks= reports the service as unreachable.
+
+** Reset
+
+=npm run reset= deletes =sync_state.json= (cursors, bootstrap flags, failures) and exits. It does not touch =qbo_object_map= or the tokens; re-running bootstrap skips everything already linked, and the cursors replay from the epoch (idempotent: unchanged hashes are no-ops).

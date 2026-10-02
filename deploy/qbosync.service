@@ -1,0 +1,31 @@
+[Unit]
+Description=qbosync — QuickBooks Online integration for UberMail (OAuth, vendor sync, API)
+Documentation=https://github.com/dprandle/qbosync
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+# Runs as root straight from the git checkout in root's home, so updates are a
+# plain `git pull` followed by `systemctl restart qbosync` (the build step below
+# recompiles dist/ on every (re)start).
+WorkingDirectory=/root/qbosync
+
+# Also cleans and rebuilds
+ExecStart=/usr/bin/npm start
+
+# Restart on crash; don't hammer on a hard config/build failure.
+Restart=on-failure
+RestartSec=10s
+
+# Give the in-process graceful shutdown (SIGTERM -> close the API server, close
+# MongoDB) room to finish; its own 10s watchdog force-exits well before this.
+TimeoutStopSec=30s
+
+# Logs to the journal: journalctl -u qbosync -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

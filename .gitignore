@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+sync_state.json
+qbo_tokens.json
+.emacs
+.dir-locals.el

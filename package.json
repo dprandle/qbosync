@@ -1,0 +1,28 @@
+{
+    "name": "qbosync",
+    "version": "1.0.0",
+    "description": "QuickBooks Online integration service for UberMail (OAuth, vendor sync, internal API)",
+    "main": "dist/index.js",
+    "scripts": {
+        "clean": "rm -rf dist && mkdir dist",
+        "build": "npm run clean && tsc",
+        "dev": "nodemon --watch src --ext ts --exec \"npm run build && node dist/index.js\"",
+        "bootstrap_vendors": "npm run build && node dist/vendors/bootstrap.js",
+        "preview_vendors": "npm run build && node dist/vendors/preview.js",
+        "start": "npm run build && node dist/index.js",
+        "reset": "npm run build && node dist/index.js --reset",
+        "deploy": "tools/deploy.sh",
+        "watch": "tools/watch.sh"
+    },
+    "dependencies": {
+        "dotenv": "^16.4.5",
+        "fastify": "^5.8.5",
+        "mongodb": "^6.8.0"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "nodemon": "^3.1.4",
+        "prettier": "^3.8.3",
+        "typescript": "^5.5.4"
+    }
+}
