@@ -20,8 +20,9 @@ echo "==> Deploying in $APP_DIR"
 cd "$APP_DIR"
 
 echo "==> Pulling latest code"
-git fetch --tags origin "$BRANCH"
-git merge --ff-only "origin/$BRANCH"
+git fetch origin "$BRANCH" --force --tags --prune-tags
+git switch "$BRANCH"
+git reset --hard "origin/$BRANCH"
 
 echo "==> Installing dependencies"
 npm ci
