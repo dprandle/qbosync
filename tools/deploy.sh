@@ -23,7 +23,11 @@ echo "==> Pulling latest code"
 git pull origin "$BRANCH"
 
 echo "==> Installing dependencies"
-npm install
+npm ci
+
+echo "==> Building"
+npm run build
+npm cache clean --force >/dev/null 2>&1 || true
 
 echo "==> Restarting $SERVICE"
 systemctl restart "$SERVICE"

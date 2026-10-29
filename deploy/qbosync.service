@@ -12,8 +12,8 @@ StartLimitBurst=5
 # recompiles dist/ on every (re)start).
 WorkingDirectory=/root/qbosync
 
-# Also cleans and rebuilds
-ExecStart=/usr/bin/npm start
+# dist/ is build by tools/deploy.sh; the unit only runs it.
+ExecStart=/usr/bin/node dist/index.js
 
 # Restart on crash; don't hammer on a hard config/build failure.
 Restart=on-failure
