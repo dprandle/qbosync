@@ -198,14 +198,26 @@ export function missing_required_fields(r: resolved_subc): string[] {
     return missing;
 }
 
-// QBO DisplayName can't contain colons, tabs or newlines, and must be unique across
-// vendors, customers and employees.
+// QBO name fields can't contain colons, tabs or newlines. DisplayName must also be
+// unique across vendors, customers and employees.
 function clean_display_name(s: string): string {
     return s
         .replace(/[:\t\r\n]/g, " ")
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 500);
+}
+
+// QBO requires an @ and a dot. Sending anything else would fail the whole vendor, so a
+// bad address is left out instead (see the email warning in preview).
+export function is_valid_email(s: string): boolean {
+    return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
+}
+
+// What the vendor's Contractor Type should be in QuickBooks. The API doesn't expose that
+// setting, so preview lists this for someone to set by hand.
+export function get_contractor_type(r: resolved_subc): "Individual" | "Business" {
+    return r.tin_from_owner ? "Individual" : "Business";
 }
 
 function format_tin(digits: string, is_ssn: boolean): string {
@@ -233,12 +245,12 @@ export function build_vendor_payload(r: resolved_subc): qbo_vendor_write {
         },
     };
     if (r.name_from_owner) {
-        v.GivenName = r.given_name.slice(0, 100);
-        v.FamilyName = r.family_name.slice(0, 100);
+        v.GivenName = clean_display_name(r.given_name).slice(0, 100);
+        v.FamilyName = clean_display_name(r.family_name).slice(0, 100);
     } else {
         v.CompanyName = payee.slice(0, 100);
     }
-    if (r.email.includes("@")) v.PrimaryEmailAddr = { Address: r.email };
+    if (is_valid_email(r.email)) v.PrimaryEmailAddr = { Address: r.email };
     if (r.phone) v.PrimaryPhone = { FreeFormNumber: r.phone };
     return v;
 }

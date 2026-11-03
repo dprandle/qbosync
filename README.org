@@ -64,7 +64,9 @@ Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcon
 | =Vendor1099=                     | always =true=                                                                        |
 | =Active=                         | subc not archived                                                                    |
 
-Updates are sparse, so anything else on the vendor (terms, expense accounts, notes) stays under accounting's control. The fields above are owned by Uber: edits to them in QBO are overwritten on the subc's next change.
+Updates are sparse, so anything else on the vendor (terms, expense accounts, notes) stays under accounting's control. The fields above are owned by Uber: edits to them in QBO are overwritten on the subc's next change. An email QBO would reject (it needs an =@= and a dot) is left out rather than failing the vendor.
+
+The 1099 *Contractor Type* (Individual or Business) isn't in the documented Vendor API, so it has to be set by hand in QBO. =npm run preview_vendors= lists the type each vendor needs: Individual for Sole Proprietor/Single Member LLC, Business for Multi Member LLC/Corp.
 
 *Required fields:* name, a 9-digit TIN (there's no fallback between the SSN and EIN), street address, city, state and zip. An incomplete subc is skipped *without* flooring the cursor; filling in the missing data bumps the subc (or its owner) and the next delta pass picks it up. A linked vendor whose subc becomes incomplete is left as-is rather than blanked out (archiving still goes through). =npm run preview_vendors= shows what's missing for each subc.
 
