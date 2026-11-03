@@ -237,7 +237,7 @@ export async function update_vendors_from_subcs(qbo: qbo_client): Promise<void> 
         candidates.set(sc._id, { subc: sc, subc_at: sc.last_update.on, from_sweep: false });
     }
 
-    // Subcs whose owner changed and that pull at least one field from that owner.
+    // Subcs whose owner changed; the owner's name is always part of the vendor.
     if (hres_at.size > 0) {
         const owned = await subc_col
             .find({ workers: { $elemMatch: { "hres_id.source_str": { $in: [...hres_at.keys()] } } } })

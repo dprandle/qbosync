@@ -50,14 +50,15 @@ Optional =QBO_EXPECTED_REALM_ID= pins a deployment to one company (QBO's "realm"
 
 Every subcontractor gets one QBO vendor. Active subc → active vendor; archived subc → vendor =Active=false= (QBO can't delete vendors). Archived subcs that never had a vendor don't get one. Employees aren't synced; QuickBooks is only used for subcontractors.
 
-Vendor fields are resolved exactly the way uber's =get_sc_*= helpers do (=sc/subcontractor.cpp=): for each field, if the subc's matching =SC_ENTITY_FLAG_USE_OWNER_*= flag is set *and* the owner hresource exists, the owner's value is used; otherwise the subc's own. Docs missing =flags= get uber's default (=USE_OWNER_ALL=).
+Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcontractor.cpp=): if the subc's matching =SC_ENTITY_FLAG_USE_OWNER_*= flag is set *and* the owner hresource exists, the owner's value is used; otherwise the subc's own. Docs missing =flags= get uber's default (=USE_OWNER_ALL=). =DisplayName= and =TaxIdentifier= don't use the flags.
 
 | Vendor field                     | Source                                                                               |
 |----------------------------------+--------------------------------------------------------------------------------------|
-| =DisplayName=, =PrintOnCheckName= | owner "First Last" (=USE_OWNER_NAME=) or =subcontractor.name=                       |
+| =DisplayName=                    | owner "First Last (Subc Name)"; just one name if they match, or if either is missing |
+| =PrintOnCheckName=               | owner "First Last" (=USE_OWNER_NAME=) or =subcontractor.name=                        |
 | =GivenName= / =FamilyName=       | owner first/last, when the name comes from the owner                                 |
 | =CompanyName=                    | =subcontractor.name=, when it doesn't                                                |
-| =TaxIdentifier=                  | owner =detail.SSN= (=USE_OWNER_SSN=) or =subcontractor.ein=                          |
+| =TaxIdentifier=                  | owner =detail.SSN= for Sole Proprietor/Single Member LLC, else =subcontractor.ein=   |
 | =BillAddr=                       | mailing address, else physical (owner's =detail.mail/phys= with =USE_OWNER_ADDRESS=) |
 | =PrimaryEmailAddr=, =PrimaryPhone= | owner or subc, per =USE_OWNER_EMAIL= / =USE_OWNER_PHONE=                          |
 | =Vendor1099=                     | always =true=                                                                        |
@@ -65,14 +66,14 @@ Vendor fields are resolved exactly the way uber's =get_sc_*= helpers do (=sc/sub
 
 Updates are sparse, so anything else on the vendor (terms, expense accounts, notes) stays under accounting's control. The fields above are owned by Uber: edits to them in QBO are overwritten on the subc's next change.
 
-*Required fields:* name, a 9-digit TIN, street address, city, state and zip. An incomplete subc is skipped *without* flooring the cursor; filling in the missing data bumps the subc (or its owner) and the next delta pass picks it up. A linked vendor whose subc becomes incomplete is left as-is rather than blanked out (archiving still goes through). =npm run preview_vendors= shows what's missing for each subc.
+*Required fields:* name, a 9-digit TIN (there's no fallback between the SSN and EIN), street address, city, state and zip. An incomplete subc is skipped *without* flooring the cursor; filling in the missing data bumps the subc (or its owner) and the next delta pass picks it up. A linked vendor whose subc becomes incomplete is left as-is rather than blanked out (archiving still goes through). =npm run preview_vendors= shows what's missing for each subc.
 
 *** Cursors
 
 Two delta cursors, both over =last_update.on=:
 
 - *subcontractor*: the subc itself changed.
-- *hresource*: an owner changed. An owner edit only bumps the hresource, but flows into every subc that pulls a field from that owner, so changed hresources are mapped to the subcs they own (=SC_WORKER_FLAG_OWNER=) that have any =USE_OWNER_*= flag set.
+- *hresource*: an owner changed. An owner edit only bumps the hresource, but flows into every subc that pulls a field from that owner, so changed hresources are mapped to the subcs they own (=SC_WORKER_FLAG_OWNER=).
 
 A subc reached from either (or both) is processed once. A transient failure floors whichever cursor(s) brought it in, exactly like qbtsync (=safe_cursor=, =earliest_unresolved=), and a cursor floored on the same item for =CURSOR_FLOOR_ALERT_PASSES= passes emails an alert.
 
@@ -101,7 +102,9 @@ Once per window (=MAPPING_CLEANUP_*=, daily by default):
 
 *** Bootstrap
 
-=npm run bootstrap_vendors= links the vendors already in QBO to subcs so the sync doesn't duplicate them. Matching is by normalized name against every name form a vendor may have (display/company/print-on-check, given+family in either order), with the visible TIN last-4 digits used to rule candidates out or confirm them: a unique TIN-confirmed match links automatically, a name-only match asks y/n, several candidates ask which one, and no match is left for the sync to create. Unmatched vendors are only listed, never archived. =--dry-run= matches and logs without writing.
+=npm run bootstrap_vendors= links the vendors already in QBO to subcs so the sync doesn't duplicate them. Names are tried strongest first: the owner's name against the vendor's given+family fields, then any exact normalized name form on either side (subc name or owner name; display/company/print-on-check or given+family), then, for 1099 vendors only, a looser match where every word of the shorter name (at least two words) appears in the longer. The vendor's visible TIN last-4 digits can match either the owner's SSN or the subc's EIN, whatever the classification; a vendor that matches neither is ruled out and logged, however good its name match.
+
+An exact name with a TIN match links automatically only when it's the subc's one plausible vendor and no other subc wants it. Every other name match then asks y/n, or which one if there are several, listing all plausible vendors with their status, 1099 flag and last-4. After that, 1099 vendors with only the last-4 in common are offered the same way, and no match is left for the sync to create. Plausible vendors left over once a subc is linked are logged as =Possible duplicate= for accounting to review. Unlinked vendors are only listed, never archived. =--dry-run= matches and logs without writing, but still asks the questions.
 
 The vendor pass idles until bootstrap sets =vendors.bootstrap_complete=; the rest of the service (OAuth, API, other features) runs regardless.
 
