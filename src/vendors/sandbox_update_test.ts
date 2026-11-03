@@ -17,6 +17,7 @@ import { ask_yes_no, ask_choice, wait_for_enter } from "../util";
 const FAKE_SSN = "123-45-6781";
 const FAKE_EIN = "12-3456782";
 const FAKE_EIN_DIGITS_AFTER_UPDATE = "123456783";
+const FAKE_EIN_DIGITS_PERSON_ONLY = "123456784";
 
 // Change on every write, or don't describe the vendor.
 const IGNORED_FIELDS = new Set(["SyncToken", "MetaData", "domain", "sparse"]);
@@ -91,6 +92,9 @@ async function ask_contractor_type(vendor: qbo_vendor, tin: string): Promise<str
 async function create_test_vendors(stamp: string): Promise<{ ssn: qbo_vendor; ein: qbo_vendor }> {
     const base = {
         Vendor1099: true,
+        GivenName: "Test",
+        FamilyName: "Vendor",
+        CompanyName: `qbosync test company ${stamp}`,
         BillAddr: { Line1: "1 Test St", City: "Dallas", CountrySubDivisionCode: "TX", PostalCode: "75001" },
     };
     // Every field here is one the sync doesn't own, so each is something a full update
@@ -134,8 +138,8 @@ async function test_real_push(ssn_id: string, stamp: string): Promise<void> {
     const resolved: resolved_subc = {
         display_name: `qbosync test pushed ${stamp}`,
         name: `qbosync test pushed ${stamp}`,
-        given_name: "",
-        family_name: "",
+        given_name: "Test",
+        family_name: "Vendor",
         name_from_owner: false,
         tin: FAKE_EIN_DIGITS_AFTER_UPDATE,
         tin_from_owner: false,
@@ -158,6 +162,45 @@ async function test_real_push(ssn_id: string, stamp: string): Promise<void> {
 
     const type = await ask_contractor_type(after, payload.TaxIdentifier ?? "");
     record("Contractor Type on update", "INFO", `After changing SSN format to EIN format, it shows: ${type}.`);
+}
+
+// What a linked vendor gets when USE_OWNER_NAME applies: an empty CompanyName should clear
+// the old value, not be refused or ignored.
+async function test_clear_company_name(id: string): Promise<void> {
+    heading("Clearing CompanyName by sending it empty");
+    const after = await run_update("Empty CompanyName update", id, { CompanyName: "" }, ["CompanyName"]);
+    const cleared = !after.CompanyName;
+    record(
+        "Clear CompanyName",
+        cleared ? "PASS" : "FAIL",
+        cleared ? "Clear CompanyName: the old value is gone" : `Clear CompanyName: still "${after.CompanyName}"`
+    );
+}
+
+// What a new vendor gets when USE_OWNER_NAME applies, for an LLC with an EIN. If QBO refuses
+// the empty CompanyName here, every new vendor like this would fail.
+async function test_create_person_only(stamp: string, created_ids: string[]): Promise<void> {
+    heading("Creating a vendor with an empty CompanyName, a person name and an EIN");
+    const resolved: resolved_subc = {
+        display_name: `qbosync test person ${stamp}`,
+        name: `qbosync test person ${stamp}`,
+        given_name: "Test",
+        family_name: "Person",
+        name_from_owner: true,
+        tin: FAKE_EIN_DIGITS_PERSON_ONLY,
+        tin_from_owner: false,
+        email: "",
+        phone: "",
+        address: { street_addr1: "3 Test St", street_addr2: "", city: "Dallas", state: "TX", zip: "75001" },
+        active: true,
+    };
+    const payload = build_vendor_payload(resolved);
+    const vendor = await qbo.create<qbo_vendor>("Vendor", payload);
+    created_ids.push(vendor.Id);
+    record("Create with empty CompanyName", "PASS", `Create with empty CompanyName: accepted (ID ${vendor.Id})`);
+
+    const type = await ask_contractor_type(vendor, payload.TaxIdentifier ?? "");
+    record("Contractor Type, person only", "INFO", `Person name only with EIN format, it shows: ${type}.`);
 }
 
 // Optional, and the only step that needs a change made by hand: flip the setting in the
@@ -231,6 +274,7 @@ async function main(): Promise<void> {
     heading("Creating test vendors");
     const { ssn, ein } = await create_test_vendors(stamp);
     ilog(`Created "${ssn.DisplayName}" (ID ${ssn.Id}) and "${ein.DisplayName}" (ID ${ein.Id})`);
+    const created_ids = [ssn.Id, ein.Id];
 
     try {
         await run_step("Contractor Type on create", () => test_contractor_type_on_create(ssn, ein));
@@ -249,9 +293,11 @@ async function main(): Promise<void> {
         );
 
         await run_step("Real sync payload", () => test_real_push(ssn.Id, stamp));
+        await run_step("Clear CompanyName", () => test_clear_company_name(ssn.Id));
+        await run_step("Create with empty CompanyName", () => test_create_person_only(stamp, created_ids));
         await run_step("Hidden field", () => test_hidden_field(ein.Id));
     } finally {
-        await deactivate_test_vendors([ssn.Id, ein.Id]);
+        await deactivate_test_vendors(created_ids);
     }
     print_summary();
 }

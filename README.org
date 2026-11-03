@@ -50,14 +50,14 @@ Optional =QBO_EXPECTED_REALM_ID= pins a deployment to one company (QBO's "realm"
 
 Every subcontractor gets one QBO vendor. Active subc → active vendor; archived subc → vendor =Active=false= (QBO can't delete vendors). Archived subcs that never had a vendor don't get one. Employees aren't synced; QuickBooks is only used for subcontractors.
 
-Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcontractor.cpp=): if the subc's matching =SC_ENTITY_FLAG_USE_OWNER_*= flag is set *and* the owner hresource exists, the owner's value is used; otherwise the subc's own. Docs missing =flags= get uber's default (=USE_OWNER_ALL=). =DisplayName= and =TaxIdentifier= don't use the flags.
+Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcontractor.cpp=): if the subc's matching =SC_ENTITY_FLAG_USE_OWNER_*= flag is set *and* the owner hresource exists, the owner's value is used; otherwise the subc's own. Docs missing =flags= get uber's default (=USE_OWNER_ALL=). =GivenName=, =FamilyName= and =TaxIdentifier= don't use the flags.
 
 | Vendor field                     | Source                                                                               |
 |----------------------------------+--------------------------------------------------------------------------------------|
-| =DisplayName=                    | owner "First Last (Subc Name)"; just one name if they match, or if either is missing |
+| =DisplayName=                    | owner "First Last" with =USE_OWNER_NAME=, else "First Last (Subc Name)"; subc name alone with no owner |
 | =PrintOnCheckName=               | owner "First Last" (=USE_OWNER_NAME=) or =subcontractor.name=                        |
-| =GivenName= / =FamilyName=       | owner first/last, when the name comes from the owner                                 |
-| =CompanyName=                    | =subcontractor.name=, when it doesn't                                                |
+| =GivenName= / =FamilyName=       | owner first/last, whenever there's an owner                                          |
+| =CompanyName=                    | =subcontractor.name=; sent empty when =USE_OWNER_NAME= applies, to clear an old value |
 | =TaxIdentifier=                  | owner =detail.SSN= for Sole Proprietor/Single Member LLC, else =subcontractor.ein=   |
 | =BillAddr=                       | mailing address, else physical (owner's =detail.mail/phys= with =USE_OWNER_ADDRESS=) |
 | =PrimaryEmailAddr=, =PrimaryPhone= | owner or subc, per =USE_OWNER_EMAIL= / =USE_OWNER_PHONE=                          |

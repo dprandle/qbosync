@@ -69,9 +69,10 @@ function format_row(row: preview_row): string[] {
 
     const v = row.vendor;
     if (v) {
-        const legal_name = v.CompanyName ?? `${v.GivenName ?? ""} ${v.FamilyName ?? ""}`.trim();
+        const person_name = `${v.GivenName ?? ""} ${v.FamilyName ?? ""}`.trim();
         lines.push(
-            field(v.CompanyName ? "Company name" : "Person name", legal_name),
+            field("Person name", person_name || "-"),
+            field("Company name", v.CompanyName || "-"),
             field("Print on check", v.PrintOnCheckName ?? "-"),
             field("Tax ID", `${row.tin_source} ${v.TaxIdentifier ?? "-"}`),
             field("Address", format_address(v)),

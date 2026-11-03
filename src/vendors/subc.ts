@@ -110,12 +110,12 @@ function trim(s: string | undefined | null): string {
 // Name, email, phone and address follow uber's get_sc_* helpers: use the owner's value
 // when the matching USE_OWNER flag is set AND the owner hresource exists, otherwise the
 // subc's own value (even if the flag is set). Keep these in step with
-// sc/subcontractor.cpp. Display name and tin deliberately don't use the flags - see
-// resolve_subc.
+// sc/subcontractor.cpp. The person name fields and tin deliberately don't use the flags -
+// see resolve_subc.
 export type resolved_subc = {
     display_name: string;
     name: string; // the payee name, per USE_OWNER_NAME
-    given_name: string; // set only when the name came from the owner
+    given_name: string; // always the owner's, whatever the flag; empty with no owner
     family_name: string;
     name_from_owner: boolean;
     tin: string; // digits only
@@ -126,14 +126,18 @@ export type resolved_subc = {
     active: boolean;
 };
 
-// "Owner First Last (Subc Name)", or just the one name when the subc is named after its
-// owner or either name is missing.
-function build_display_name(owner_name: string, subc_name: string): string {
-    if (!owner_name) return subc_name;
-    if (!subc_name || clean_display_name(subc_name).toLowerCase() === clean_display_name(owner_name).toLowerCase()) {
+// "Owner First Last (Company Name)" when the company name is in use, otherwise just the
+// owner's name. `company_name` is empty when USE_OWNER_NAME applies. A company named
+// after its owner isn't repeated, and a subc with no owner is just its company name.
+function build_display_name(owner_name: string, company_name: string): string {
+    if (!owner_name) return company_name;
+    if (
+        !company_name ||
+        clean_display_name(company_name).toLowerCase() === clean_display_name(owner_name).toLowerCase()
+    ) {
         return owner_name;
     }
-    return `${owner_name} (${subc_name})`;
+    return `${owner_name} (${company_name})`;
 }
 
 export function resolve_subc(sc: subc_doc, owner: hresource_doc | null): resolved_subc {
@@ -155,15 +159,15 @@ export function resolve_subc(sc: subc_doc, owner: hresource_doc | null): resolve
         : { mail: sc.mail_address, phys: sc.phys_address };
     const address = trim(addr_src.mail?.street_addr1) ? addr_src.mail! : (addr_src.phys ?? EMPTY_ADDR);
 
-    const given_name = name_from_owner ? trim(owner!.first_name) : "";
-    const family_name = name_from_owner ? trim(owner!.last_name) : "";
+    const given_name = trim(owner?.first_name);
+    const family_name = trim(owner?.last_name);
 
     // name_first_last for the owner, same as get_sc_name(..., last_comma_first=false)
-    const owner_name = owner ? `${trim(owner.first_name)} ${trim(owner.last_name)}`.trim() : "";
+    const owner_name = `${given_name} ${family_name}`.trim();
     const subc_name = trim(sc.name);
 
     return {
-        display_name: build_display_name(owner_name, subc_name),
+        display_name: build_display_name(owner_name, name_from_owner ? "" : subc_name),
         name: name_from_owner ? owner_name : subc_name,
         given_name,
         family_name,
@@ -244,12 +248,10 @@ export function build_vendor_payload(r: resolved_subc): qbo_vendor_write {
             PostalCode: r.address.zip,
         },
     };
-    if (r.name_from_owner) {
-        v.GivenName = clean_display_name(r.given_name).slice(0, 100);
-        v.FamilyName = clean_display_name(r.family_name).slice(0, 100);
-    } else {
-        v.CompanyName = payee.slice(0, 100);
-    }
+    if (r.given_name) v.GivenName = clean_display_name(r.given_name).slice(0, 100);
+    if (r.family_name) v.FamilyName = clean_display_name(r.family_name).slice(0, 100);
+    // Sent empty rather than left out, since a sparse update wouldn't clear an old value.
+    v.CompanyName = r.name_from_owner ? "" : payee.slice(0, 100);
     if (is_valid_email(r.email)) v.PrimaryEmailAddr = { Address: r.email };
     if (r.phone) v.PrimaryPhone = { FreeFormNumber: r.phone };
     return v;
