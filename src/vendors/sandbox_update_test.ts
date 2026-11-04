@@ -13,13 +13,15 @@ import {
     resolve_subc,
 } from "./subc";
 import { last4 } from "./vendor_match";
-import { ask_yes_no, ask_choice } from "../util";
+import { ask_yes_no, ask_choice, wait_for_enter } from "../util";
 
 // Throwaway test (npm run test_vendor_updates), sandbox only. Answers what the Vendor docs
 // don't settle about updating an existing vendor:
 //   1. Does QBO honor sparse: true on vendors, or does it wipe the fields we don't send?
 //   2. Do empty strings actually clear GivenName, FamilyName and CompanyName?
 //   3. Does QBO recalculate Contractor Type when those fields change?
+//   4. Do real pushes leave alone what someone entered by hand in the dashboard, including
+//      anything the API doesn't return?
 // Payloads come from the sync's own resolve_subc and build_vendor_payload, so this tests
 // what the first push really sends.
 //
@@ -209,6 +211,48 @@ async function test_push(label: string, id: string, payload: qbo_vendor_write, w
     return type;
 }
 
+// Production vendors hold data accounting entered by hand. The API comparison only covers
+// what the API returns, so the person running this checks the dashboard for the rest. Pushes
+// both classifications so the update really changes the vendor, ending where it started.
+async function test_hand_entered_fields(id: string, stamp: string): Promise<void> {
+    heading("Fields entered by hand in the dashboard");
+    const before_edit = await read_vendor(id);
+    ilog(`\nACTION: in the QuickBooks dashboard, open vendor "${before_edit.DisplayName}" (ID ${id}).`);
+    ilog("        Fill in everything accounting might use, such as notes, terms and a default");
+    ilog("        expense category, then save. Write down or screenshot what you entered.");
+    ilog("        Leave these alone, because the sync owns them and will overwrite them:");
+    ilog("        names, print-on-check name, tax ID, 1099 setting, billing address.");
+    await wait_for_enter("Press Enter once it's saved");
+
+    const before = await read_vendor(id);
+    if (before.SyncToken === before_edit.SyncToken) {
+        record("Hand-entered fields", "FAIL", "Hand-entered fields: the save didn't register, so nothing was tested.");
+        return;
+    }
+    const visible = diff_vendors(before_edit, before);
+    print_diffs(visible);
+    const names = visible.map((d) => d.field).join(", ") || "none";
+    ilog(`\nYour edit changed these fields in the API response: ${names}.`);
+    ilog("Those are compared automatically. Anything else you entered depends on your check below.");
+
+    for (const [label, entity_type] of [
+        ["Multi Member/Corp", SC_ENTITY_TYPE_MULTI_MEMBER],
+        ["Sole Prop", SC_ENTITY_TYPE_SOLE_PROPRIETER],
+    ] as const) {
+        const payload = build_real_payload(stamp, entity_type);
+        const expected = [...Object.keys(payload), "FullyQualifiedName"];
+        await run_update(`${label} push over hand-entered fields`, id, payload, expected);
+    }
+
+    ilog(`\nACTION: reload vendor (ID ${id}) in the dashboard and compare it with what you entered.`);
+    const kept = await ask_yes_no("Is everything you entered still there?");
+    record(
+        "Hand-entered fields",
+        kept ? "PASS" : "FAIL",
+        kept ? "Hand-entered fields: still there after both pushes" : "Hand-entered fields: something was lost"
+    );
+}
+
 // Every combination of person name, company name and tax ID format, to work out exactly
 // what sets Contractor Type. "Unset" means sent as an empty string, not left out, since a
 // missing field makes the dashboard look like personal information is missing. Run on its
@@ -347,6 +391,8 @@ async function main(): Promise<void> {
         } else {
             record("Recalculates", "INFO", "Contractor Type did not follow the update in both directions.");
         }
+
+        await run_step("Hand-entered fields", () => test_hand_entered_fields(vendor.Id, stamp));
     } finally {
         await deactivate_test_vendors([vendor.Id]);
     }
