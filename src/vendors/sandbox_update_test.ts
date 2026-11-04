@@ -10,6 +10,8 @@ import { ask_yes_no, ask_choice, wait_for_enter } from "../util";
 // Vendor docs don't settle:
 //   1. Does QBO honor sparse: true on vendors, or does it wipe the fields we don't send?
 //   2. Does QBO set the 1099 Contractor Type from the format of the tax ID?
+// Pass --contractor-matrix (npm run test_vendor_updates -- --contractor-matrix) to skip the
+// update tests and try every combination of name fields and tax ID format instead.
 // It creates its own test vendors with fake tax IDs and sets them inactive at the end. It
 // tells you when to look at something in the QuickBooks dashboard. Delete it once it has
 // answered these.
@@ -26,6 +28,15 @@ const CONTRACTOR_TYPES = ["Individual", "Business", "Not set or can't tell"];
 
 type result = { name: string; status: "PASS" | "FAIL" | "INFO"; detail: string };
 type field_diff = { field: string; kind: "lost" | "changed" | "added"; before: unknown; after: unknown };
+type matrix_row = {
+    person: boolean;
+    company: boolean;
+    tin_kind: "SSN" | "EIN";
+    tin: string;
+    name: string;
+    vendor: qbo_vendor | null;
+    result: string;
+};
 
 const qbo = new qbo_client();
 const results: result[] = [];
@@ -224,6 +235,55 @@ async function test_hidden_field(ein_id: string): Promise<void> {
     else record("Hidden field", "INFO", `Changed in the API response: ${diffs.map((d) => d.field).join(", ")}`);
 }
 
+// Every combination of person name, company name and tax ID format, to work out exactly
+// what sets Contractor Type. "Unset" means left out of the create. Run on its own with
+// --contractor-matrix.
+async function run_contractor_matrix(stamp: string): Promise<void> {
+    heading("Creating one vendor per combination");
+    const rows: matrix_row[] = [];
+    for (const person of [true, false]) {
+        for (const company of [true, false]) {
+            for (const tin_kind of ["SSN", "EIN"] as const) {
+                const n = 10 + rows.length;
+                const tin = tin_kind === "SSN" ? `123-45-67${n}` : `12-34567${n}`;
+                const parts = [person ? "person" : "no person", company ? "company" : "no company", tin_kind];
+                const name = `qbosync matrix ${stamp} ${rows.length + 1} ${parts.join(", ")}`;
+                const row: matrix_row = { person, company, tin_kind, tin, name, vendor: null, result: "" };
+                try {
+                    row.vendor = await qbo.create<qbo_vendor>("Vendor", {
+                        DisplayName: name,
+                        Vendor1099: true,
+                        TaxIdentifier: tin,
+                        ...(person ? { GivenName: "Test", FamilyName: "Vendor" } : {}),
+                        ...(company ? { CompanyName: `qbosync test company ${stamp} ${rows.length + 1}` } : {}),
+                    });
+                    ilog(`  ID ${row.vendor.Id.padEnd(8)}${name}`);
+                } catch (err) {
+                    row.result = `Refused: ${err instanceof Error ? err.message : err}`;
+                    ilog(`  Refused ${name}: ${row.result}`);
+                }
+                rows.push(row);
+            }
+        }
+    }
+
+    try {
+        heading("Checking each vendor in the dashboard");
+        for (const row of rows) {
+            if (row.vendor) row.result = await ask_contractor_type(row.vendor, row.tin);
+        }
+    } finally {
+        await deactivate_test_vendors(rows.flatMap((r) => (r.vendor ? [r.vendor.Id] : [])));
+    }
+
+    heading("Contractor Type by combination");
+    ilog(`  ${"Person name".padEnd(14)}${"Company name".padEnd(15)}${"Tax ID".padEnd(9)}Contractor Type`);
+    for (const r of rows) {
+        const [person, company] = [r.person ? "set" : "unset", r.company ? "set" : "unset"];
+        ilog(`  ${person.padEnd(14)}${company.padEnd(15)}${r.tin_kind.padEnd(9)}${r.result}`);
+    }
+}
+
 // A failing step is itself an answer (a rejected Active-only update would suggest QBO
 // wants the full object), so it's recorded and the rest still runs.
 async function run_step(name: string, step: () => Promise<unknown>): Promise<void> {
@@ -271,6 +331,11 @@ async function main(): Promise<void> {
     if (!(await ask_yes_no("Create test vendors in this sandbox company?"))) return;
 
     const stamp = Date.now().toString(36);
+    if (process.argv.includes("--contractor-matrix")) {
+        await run_contractor_matrix(stamp);
+        return;
+    }
+
     heading("Creating test vendors");
     const { ssn, ein } = await create_test_vendors(stamp);
     ilog(`Created "${ssn.DisplayName}" (ID ${ssn.Id}) and "${ein.DisplayName}" (ID ${ein.Id})`);
