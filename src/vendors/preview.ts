@@ -1,8 +1,11 @@
 import "../global_setup";
 import mongo from "../db";
 import { get_sync_state } from "../sync_state";
-import { type qbo_vendor_write } from "./vendor_api";
+import { qbo_client } from "../qbo/client";
+import { type qbo_vendor, type qbo_vendor_write, fetch_all_vendors } from "./vendor_api";
 import {
+    type subc_doc,
+    type hresource_doc,
     get_owner_hres_id,
     resolve_subc,
     missing_required_fields,
@@ -12,11 +15,13 @@ import {
     is_valid_email,
 } from "./subc";
 import { load_owners, load_mappings } from "./sync";
+import { match_vendor, is_plausible } from "./vendor_match";
 
 // Read-only (npm run preview_vendors): shows what the sync would push for every subc - the
-// resolved vendor fields (TIN redacted), what's missing, and whether it's linked - plus the
-// Contractor Type each vendor needs set by hand in QuickBooks. No QBO calls and no writes,
-// so it's safe against any database. Pass --json for machine-readable output.
+// resolved vendor fields (TIN redacted), what's missing, whether it's linked, and any
+// DisplayName that would collide. Reads QuickBooks to look for those collisions but never
+// writes to it or the database. If QuickBooks can't be read, it says so and still checks
+// the subcs against each other. Pass --json for machine-readable output.
 
 const as_json = process.argv.includes("--json");
 
@@ -32,10 +37,21 @@ type preview_row = {
     failure: string | null;
     missing: string[];
     warnings: string[];
+    collisions: string[];
     tin_source: "SSN" | "EIN";
     contractor_type: "Individual" | "Business";
     vendor: qbo_vendor_write | null;
 };
+
+// Something in QuickBooks already using a DisplayName, which must be unique across vendors,
+// customers and employees.
+type name_holder = {
+    name: string;
+    label: string;
+    vendor: qbo_vendor | null;
+};
+
+type named_entity = { Id: string; DisplayName?: string; Active?: boolean };
 
 function get_status(active: boolean, linked: boolean, failed: boolean, incomplete: boolean): preview_status {
     if (!active) return linked ? "archived_linked" : "archived";
@@ -44,9 +60,85 @@ function get_status(active: boolean, linked: boolean, failed: boolean, incomplet
     return linked ? "linked" : "ready";
 }
 
-// A vendor exists or is about to, so it needs its Contractor Type set.
-function needs_contractor_type(row: preview_row): boolean {
-    return row.active && (row.linked_vendor !== null || row.missing.length === 0);
+function holder_label(kind: string, e: named_entity): string {
+    return `${kind} "${e.DisplayName}" (ID ${e.Id}${e.Active === false ? ", inactive" : ""})`;
+}
+
+// Returns what it could read, plus a note for anything it couldn't, since a missing list
+// means collisions with those entities went unchecked.
+async function load_name_holders(qbo: qbo_client): Promise<{ holders: name_holder[]; problems: string[] }> {
+    const holders: name_holder[] = [];
+    const problems: string[] = [];
+    const describe = (err: unknown) => (err instanceof Error ? err.message : String(err));
+    try {
+        for (const v of await fetch_all_vendors(qbo)) {
+            holders.push({ name: v.DisplayName, label: holder_label("vendor", v), vendor: v });
+        }
+    } catch (err) {
+        problems.push(`Couldn't read vendors: ${describe(err)}`);
+    }
+    for (const [entity, kind] of [
+        ["Customer", "customer"],
+        ["Employee", "employee"],
+    ]) {
+        try {
+            for (const e of await qbo.query_all<named_entity>(entity, "Active in (true, false)")) {
+                if (e.DisplayName) holders.push({ name: e.DisplayName, label: holder_label(kind, e), vendor: null });
+            }
+        } catch (err) {
+            problems.push(`Couldn't read ${kind}s: ${describe(err)}`);
+        }
+    }
+    return { holders, problems };
+}
+
+function name_key(s: string): string {
+    return s.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+// Fills in row.collisions for every subc whose name the sync will push. Two subcs resolving
+// to one name is a data error (an owner with several entities needs their company names on
+// file), so the sync lets the later one fail and alert. This shows them ahead of time.
+function find_collisions(
+    rows: preview_row[],
+    holders: name_holder[],
+    sources: Map<string, { sc: subc_doc; owner: hresource_doc | null }>,
+    bootstrap_complete: boolean
+): void {
+    const pushing = rows.filter((r) => r.active && r.vendor);
+
+    const rows_by_name = new Map<string, preview_row[]>();
+    for (const row of pushing) {
+        const list = rows_by_name.get(name_key(row.name)) ?? [];
+        list.push(row);
+        rows_by_name.set(name_key(row.name), list);
+    }
+    const holders_by_name = new Map<string, name_holder[]>();
+    for (const holder of holders) {
+        const list = holders_by_name.get(name_key(holder.name)) ?? [];
+        list.push(holder);
+        holders_by_name.set(name_key(holder.name), list);
+    }
+
+    for (const row of pushing) {
+        const key = name_key(row.name);
+        const others = (rows_by_name.get(key) ?? []).filter((o) => o !== row);
+        for (const o of others) row.collisions.push(`Same name as subcontractor ${o.id}`);
+
+        for (const holder of holders_by_name.get(key) ?? []) {
+            const vendor = holder.vendor;
+            if (vendor) {
+                if (vendor.Id === row.linked_vendor) continue;
+                // Already reported above, as a collision with the subc that owns this vendor.
+                if (others.some((o) => o.linked_vendor === vendor.Id)) continue;
+                // Before the bootstrap, this is probably the vendor it will link to.
+                const source = sources.get(row.id);
+                const match = source ? match_vendor(source.sc, source.owner, vendor) : null;
+                if (!bootstrap_complete && !row.linked_vendor && match && is_plausible(match)) continue;
+            }
+            row.collisions.push(`Name already used by ${holder.label}`);
+        }
+    }
 }
 
 function field(label: string, value: string): string {
@@ -75,6 +167,7 @@ function format_row(row: preview_row): string[] {
             field("Company name", v.CompanyName || "-"),
             field("Print on check", v.PrintOnCheckName ?? "-"),
             field("Tax ID", `${row.tin_source} ${v.TaxIdentifier ?? "-"}`),
+            field("Contractor type", row.contractor_type),
             field("Address", format_address(v)),
             field("Email", v.PrimaryEmailAddr?.Address ?? "-"),
             field("Phone", v.PrimaryPhone?.FreeFormNumber ?? "-")
@@ -84,12 +177,17 @@ function format_row(row: preview_row): string[] {
     return lines;
 }
 
-function print_section(title: string, rows: preview_row[], format: (row: preview_row) => string[]): void {
+function print_section(
+    title: string,
+    rows: preview_row[],
+    format: (row: preview_row) => string[],
+    spaced = true
+): void {
     if (rows.length === 0) return;
     console.log(`\n${title} (${rows.length})`);
     console.log("-".repeat(title.length + rows.length.toString().length + 3));
     rows.forEach((row, i) => {
-        if (i > 0 && format === format_row) console.log("");
+        if (i > 0 && spaced) console.log("");
         format(row).forEach((line) => console.log(line));
     });
 }
@@ -99,36 +197,26 @@ function format_compact(row: preview_row): string[] {
     return [`  ${row.name} (${row.id})${vendor}`];
 }
 
-function print_worklist(rows: preview_row[]): void {
-    const list = rows.filter(needs_contractor_type).sort((a, b) => {
-        return a.contractor_type.localeCompare(b.contractor_type) || a.name.localeCompare(b.name);
-    });
-    if (list.length === 0) return;
-
-    const title = `Contractor Type to set in QuickBooks (${list.length})`;
-    console.log(`\n${title}`);
-    console.log("-".repeat(title.length));
-    console.log("  The API doesn't expose this setting. Set by hand, under each vendor's personal details.\n");
-
-    const name_width = Math.max("Vendor".length, ...list.map((r) => r.name.length));
-    console.log(`  ${"Type".padEnd(12)}${"Vendor".padEnd(name_width + 2)}Vendor ID`);
-    for (const row of list) {
-        console.log(
-            `  ${row.contractor_type.padEnd(12)}${row.name.padEnd(name_width + 2)}${row.linked_vendor ?? "(new)"}`
-        );
-    }
+function format_collision(row: preview_row): string[] {
+    return [`  ${row.name} (${row.id})`, ...row.collisions.map((c) => `    ${c}`)];
 }
 
-function print_preview(rows: preview_row[]): void {
+function print_preview(rows: preview_row[], problems: string[]): void {
     const of = (status: preview_status) => rows.filter((r) => r.status === status);
+    const colliding = rows.filter((r) => r.collisions.length > 0);
 
+    if (problems.length > 0) {
+        console.log("\nCollision check is incomplete");
+        console.log("-----------------------------");
+        for (const p of problems) console.log(`  ${p}`);
+    }
+    print_section("Name collisions - the sync will fail and alert", colliding, format_collision);
     print_section("Last sync failed", of("failed"), format_row);
     print_section("Incomplete - no updates until fixed", of("incomplete"), format_row);
     print_section("Ready - vendor will be created", of("ready"), format_row);
     print_section("Linked - vendor will be kept in sync", of("linked"), format_row);
-    print_section("Archived - vendor kept inactive", of("archived_linked"), format_compact);
-    print_section("Archived - no vendor, none will be created", of("archived"), format_compact);
-    print_worklist(rows);
+    print_section("Archived - vendor kept inactive", of("archived_linked"), format_compact, false);
+    print_section("Archived - no vendor, none will be created", of("archived"), format_compact, false);
 
     const active = rows.filter((r) => r.active).length;
     console.log("\nSummary");
@@ -136,6 +224,7 @@ function print_preview(rows: preview_row[]): void {
     const counts: [string, number][] = [
         ["Subcontractors", rows.length],
         ["Active", active],
+        ["Name collisions", colliding.length],
         ["Failed", of("failed").length],
         ["Incomplete", of("incomplete").length],
         ["Ready to create", of("ready").length],
@@ -150,14 +239,17 @@ async function main(): Promise<void> {
         const subcs = await mongo.get_subcs().find({}).sort({ name: 1 }).toArray();
         const owners = await load_owners(subcs);
         const mappings = await load_mappings(subcs.map((s) => s._id));
-        const failures = get_sync_state().vendors.failures;
+        const state = get_sync_state().vendors;
+        const sources = new Map<string, { sc: subc_doc; owner: hresource_doc | null }>();
 
         const rows = subcs.map((sc): preview_row => {
             const owner_id = get_owner_hres_id(sc);
-            const r = resolve_subc(sc, owner_id ? (owners.get(owner_id) ?? null) : null);
+            const owner = owner_id ? (owners.get(owner_id) ?? null) : null;
+            sources.set(sc._id, { sc, owner });
+            const r = resolve_subc(sc, owner);
             const missing = missing_required_fields(r);
             const m = mappings.get(sc._id);
-            const failure = failures[sc._id]?.error ?? null;
+            const failure = state.failures[sc._id]?.error ?? null;
             const warnings: string[] = [];
             if (r.email && !is_valid_email(r.email)) warnings.push(`Email "${r.email}" isn't valid, so it's left out`);
             return {
@@ -170,14 +262,18 @@ async function main(): Promise<void> {
                 failure,
                 missing,
                 warnings,
+                collisions: [],
                 tin_source: r.tin_from_owner ? "SSN" : "EIN",
                 contractor_type: get_contractor_type(r),
                 vendor: missing.length === 0 ? redact_payload(build_vendor_payload(r)) : null,
             };
         });
 
-        if (as_json) console.log(JSON.stringify(rows, null, 2));
-        else print_preview(rows);
+        const { holders, problems } = await load_name_holders(new qbo_client());
+        find_collisions(rows, holders, sources, state.bootstrap_complete);
+
+        if (as_json) console.log(JSON.stringify({ collision_check_problems: problems, rows }, null, 2));
+        else print_preview(rows, problems);
     } finally {
         await mongo.disconnect();
     }

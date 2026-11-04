@@ -232,8 +232,8 @@ export function is_valid_email(s: string): boolean {
     return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
 }
 
-// What the vendor's Contractor Type should be in QuickBooks. The API doesn't expose that
-// setting, so preview lists this for someone to set by hand.
+// The Contractor Type QBO should work out from the fields we send. Preview shows it so the
+// result can be checked by eye.
 export function get_contractor_type(r: resolved_subc): "Individual" | "Business" {
     return r.tin_from_owner ? "Individual" : "Business";
 }
