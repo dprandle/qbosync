@@ -33,7 +33,7 @@ const ANY_ACTIVE = "Active in (true, false)";
 
 // Returns null when the vendor doesn't exist (wrong realm, or mapping is stale).
 export function get_vendor(qbo: qbo_client, id: string): Promise<qbo_vendor | null> {
-    return qbo.read<qbo_vendor>("Vendor", id);
+    return qbo.read<qbo_vendor>("Vendor", id, true);
 }
 
 export function create_vendor(qbo: qbo_client, v: qbo_vendor_write): Promise<qbo_vendor> {

@@ -113,7 +113,7 @@ async function main(): Promise<void> {
                 return {
                     sc,
                     active: r.active,
-                    label: `${get_subc_log_str(sc)} [${r.display_name}${r.active ? "" : ", archived"}]`,
+                    label: `${get_subc_log_str(sc, owner)} [${r.display_name}${r.active ? "" : ", archived"}]`,
                     matches: match_vendors(sc, owner, open_vendors),
                 };
             });
@@ -191,9 +191,7 @@ async function main(): Promise<void> {
         }
         for (const row of rows) {
             if (row.active && !linked_subcs.has(row.sc._id)) {
-                ilog(
-                    `[bootstrap] No vendor for active ${get_subc_log_str(row.sc)} - the sync will create one once it's complete`
-                );
+                ilog(`[bootstrap] No vendor for active ${row.label} - the sync will create one once it's complete`);
             }
         }
         for (const v of vendors) {

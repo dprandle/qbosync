@@ -4,7 +4,7 @@ import { fetch_vendors_by_ids, update_vendor, get_vendor_log_str } from "./vendo
 import { get_sync_state } from "../sync_state";
 import { clear_vendor_failure } from "./failures";
 import { process_subc, load_owners, load_mappings } from "./sync";
-import { get_subc_log_str } from "./subc";
+import { get_subc_log_str, get_subc_owner } from "./subc";
 
 // Safety net for what the delta loop structurally can't see (same policy as
 // qbtsync's cleanup):
@@ -83,7 +83,7 @@ async function retry_failures(qbo: qbo_client): Promise<void> {
         try {
             await process_subc(sc, ctx, false);
         } catch (err) {
-            elog(`[cleanup] Retry of ${get_subc_log_str(sc)} failed transiently:`, err);
+            elog(`[cleanup] Retry of ${get_subc_log_str(sc, get_subc_owner(sc, ctx.owners))} failed transiently:`, err);
         }
     }
 }

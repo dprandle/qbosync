@@ -105,8 +105,17 @@ export function uses_owner(sc: subc_doc): boolean {
     return get_owner_hres_id(sc) !== null;
 }
 
-export function get_subc_log_str(sc: subc_doc): string {
-    return `"${sc.name}" (${sc._id})`;
+// The owner hresource for a subc out of a map loaded by load_owners, or null when the
+// subc has no owner or the owner isn't in the map.
+export function get_subc_owner(sc: subc_doc, owners: Map<string, hresource_doc>): hresource_doc | null {
+    const owner_id = get_owner_hres_id(sc);
+    return owner_id ? (owners.get(owner_id) ?? null) : null;
+}
+
+// For logs and alert emails: the payee name the vendor gets (resolved_subc.name), so a
+// sole proprietor going by the owner's name is reported that way too.
+export function get_subc_log_str(sc: subc_doc, owner: hresource_doc | null): string {
+    return `"${resolve_subc(sc, owner).name}" (${sc._id})`;
 }
 
 const EMPTY_ADDR: us_address = { zip: "", city: "", state: "", street_addr1: "", street_addr2: "" };
@@ -134,18 +143,13 @@ export type resolved_subc = {
     active: boolean;
 };
 
-// "Owner First Last (Company Name)" when the company name is in use, otherwise just the
-// owner's name. `company_name` is empty when USE_OWNER_NAME applies. A company named
-// after its owner isn't repeated, and a subc with no owner is just its company name.
-function build_display_name(owner_name: string, company_name: string): string {
-    if (!owner_name) return company_name;
-    if (
-        !company_name ||
-        clean_display_name(company_name).toLowerCase() === clean_display_name(owner_name).toLowerCase()
-    ) {
-        return owner_name;
-    }
-    return `${owner_name} (${company_name})`;
+// "Owner First Last (Subc Name)". The parentheses stay when the subc name is empty, so
+// the gap shows in QBO, except for a sole proprietor, who is then just the owner. A
+// subc with no owner is just its own name.
+function build_display_name(owner_name: string, subc_name: string, sole_proprietor: boolean): string {
+    if (!owner_name) return subc_name;
+    if (!subc_name && sole_proprietor) return owner_name;
+    return `${owner_name} (${subc_name})`;
 }
 
 export function resolve_subc(sc: subc_doc, owner: hresource_doc | null): resolved_subc {
@@ -155,7 +159,10 @@ export function resolve_subc(sc: subc_doc, owner: hresource_doc | null): resolve
     // By entity type alone: a single member LLC can have an EIN on file but still reports
     // under the owner's SSN. There's no fallback between the two, so a subc without the one
     // it needs shows up as missing its tax id.
+    const entity_type = sc.entity_type ?? SC_ENTITY_TYPE_SOLE_PROPRIETOR;
     const tin_from_owner = is_disregarded_entity(sc);
+    const sole_proprietor = entity_type === SC_ENTITY_TYPE_SOLE_PROPRIETOR;
+    const single_member_llc = entity_type === SC_ENTITY_TYPE_SINGLE_MEMBER_LLC;
 
     // Uber disables the name flag for entities that aren't disregarded, so a value left over
     // on an older doc is ignored: those always use the subc's own name.
@@ -181,12 +188,29 @@ export function resolve_subc(sc: subc_doc, owner: hresource_doc | null): resolve
     // and no person name.
     const is_individual = tin_from_owner;
 
+    // The name fields by entity type (the README has the table):
+    //   Sole proprietor + USE_OWNER_NAME: no company; payee and display are the owner.
+    //   Single member LLC + USE_OWNER_NAME: company, payee and display are "Owner LLC".
+    //   Otherwise: company and payee are the subc name, display "Owner (Subc Name)".
+    let company_name: string;
+    let name: string;
+    let display_name: string;
+    if (name_from_owner) {
+        name = single_member_llc ? `${owner_name} LLC` : owner_name;
+        company_name = single_member_llc ? name : "";
+        display_name = name;
+    } else {
+        name = subc_name;
+        company_name = subc_name;
+        display_name = build_display_name(owner_name, subc_name, sole_proprietor);
+    }
+
     return {
-        display_name: build_display_name(owner_name, name_from_owner ? "" : subc_name),
-        name: name_from_owner ? owner_name : subc_name,
+        display_name,
+        name,
         given_name: is_individual ? owner_first : "",
         family_name: is_individual ? owner_last : "",
-        company_name: name_from_owner ? "" : subc_name,
+        company_name,
         tin: (tin_from_owner ? (owner?.detail?.SSN ?? "") : sc.ein).replace(/\D/g, ""),
         tin_from_owner,
         email: trim(use(SC_ENTITY_FLAG_USE_OWNER_EMAIL) ? owner!.email : sc.email),

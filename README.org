@@ -54,15 +54,25 @@ Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcon
 
 | Vendor field                     | Source                                                                               |
 |----------------------------------+--------------------------------------------------------------------------------------|
-| =DisplayName=                    | owner "First Last" with =USE_OWNER_NAME=, else "First Last (Subc Name)"; subc name alone with no owner |
-| =PrintOnCheckName=               | owner "First Last" (=USE_OWNER_NAME=) or =subcontractor.name=                        |
+| =DisplayName=                    | see the name table below                                                             |
+| =PrintOnCheckName=               | see the name table below                                                             |
 | =GivenName= / =FamilyName=       | owner first/last for disregarded entities; empty otherwise                           |
-| =CompanyName=                    | =subcontractor.name=; empty for disregarded entities when =USE_OWNER_NAME= applies   |
+| =CompanyName=                    | see the name table below                                                             |
 | =TaxIdentifier=                  | owner =detail.SSN= for disregarded entities, else =subcontractor.ein=                |
 | =BillAddr=                       | mailing address, else physical (owner's =detail.mail/phys= with =USE_OWNER_ADDRESS=) |
 | =PrimaryEmailAddr=, =PrimaryPhone= | owner or subc, per =USE_OWNER_EMAIL= / =USE_OWNER_PHONE=                          |
 | =Vendor1099=                     | always =true=                                                                        |
 | =Active=                         | subc not archived                                                                    |
+
+The name fields go by entity type and =USE_OWNER_NAME= ("Owner" is the owner's "First Last", "Subc" is =subcontractor.name=). The parentheses stay when the subc name is empty so the gap is visible in QBO; a subc with no owner is just its own name. =PrintOnCheckName= is also the name used in logs and alert emails.
+
+| Entity type         | =USE_OWNER_NAME= | =CompanyName= | =PrintOnCheckName= | =DisplayName=                 |
+|---------------------+------------------+---------------+--------------------+-------------------------------|
+| Sole proprietor     | set              | empty         | Owner              | Owner                         |
+| Sole proprietor     | unset            | Subc          | Subc               | "Owner (Subc)", or Owner alone when Subc is empty |
+| Single member LLC   | set              | "Owner LLC"   | "Owner LLC"        | "Owner LLC"                   |
+| Single member LLC   | unset            | Subc          | Subc               | "Owner (Subc)"                |
+| All other types     | ignored          | Subc          | Subc               | "Owner (Subc)"                |
 
 Updates are sparse, so anything else on the vendor (terms, expense accounts, notes) stays under accounting's control. The fields above are owned by Uber: edits to them in QBO are overwritten on the subc's next change. An email QBO would reject (it needs an =@= and a dot) is left out rather than failing the vendor.
 

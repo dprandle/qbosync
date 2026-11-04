@@ -18,8 +18,11 @@ export const QUERY_PAGE_SIZE = 1000;
 // SyncToken (someone edited the entity between our read and write).
 const TRANSIENT_FAULT_CODES = new Set(["5010"]);
 
-// "Object Not Found" comes back as a 400 ValidationFault with code 610.
-const NOT_FOUND_CODE = "610";
+// What a GET of a missing id returns depends on the entity (checked against the sandbox,
+// Nov 2026): Item, Employee, Bill and Purchase give the documented 610 "Object Not
+// Found", but Vendor and Customer give 2010 "Request has invalid or unsupported
+// property", the same generic code a malformed write gets. So read() doesn't trust the
+// code at all and confirms a missing entity with a query.
 
 // Fields every QBO entity carries.
 export type qbo_entity = {
@@ -108,13 +111,26 @@ export function q_str(s: string): string {
 // `entity` is the QBO entity name as it appears in responses ("Vendor", "Purchase",
 // "Bill"); its lowercase form is the REST path segment.
 export class qbo_client {
-    // Returns null when the entity doesn't exist in this realm.
-    async read<T extends qbo_entity>(entity: string, id: string): Promise<T | null> {
+    // Returns null when the entity doesn't exist in this realm. `has_active_flag` is for
+    // name-list entities (Vendor, Customer, Employee, Item): their queries only return
+    // active rows unless asked, and an inactive entity still exists.
+    async read<T extends qbo_entity>(entity: string, id: string, has_active_flag = false): Promise<T | null> {
         try {
             const res = await qbo_request("GET", `/${entity.toLowerCase()}/${encodeURIComponent(id)}`, {});
             return res[entity] as T;
         } catch (err) {
-            if (err instanceof qbo_api_error && err.codes.includes(NOT_FOUND_CODE)) return null;
+            if (!(err instanceof qbo_api_error)) throw err;
+            // A ValidationFault on a GET is either a missing entity (see above) or a
+            // genuinely bad request. A query settles it: nothing found means missing;
+            // found means the original error stands. If the query itself fails its error
+            // is the one thrown - a transient one (5xx, 429) then gets retried instead of
+            // the GET's 400 being recorded as permanent, and a bad id gets QBO's clearer
+            // "Invalid ID" message.
+            if (err.status === 400 && err.fault_type === "ValidationFault") {
+                const where = `${has_active_flag ? "Active in (true, false) and " : ""}Id = ${q_str(id)}`;
+                const rows = await this.query<qbo_entity>(entity, where, 1, 1);
+                if (rows.length === 0) return null;
+            }
             throw err;
         }
     }

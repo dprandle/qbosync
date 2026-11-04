@@ -26,6 +26,7 @@ import {
     type hresource_doc,
     OWNER_PROJECTION,
     get_owner_hres_id,
+    get_subc_owner,
     uses_owner,
     get_subc_log_str,
     resolve_subc,
@@ -96,7 +97,7 @@ async function save_mapping_after_write(mapping: qbo_object_map, vendor: qbo_ven
 // four digits match ours. Anything else stays a permanent failure for a human.
 async function try_link_existing(
     qbo: qbo_client,
-    sc: subc_doc,
+    label: string,
     display_name: string,
     tin: string
 ): Promise<qbo_vendor | null> {
@@ -105,7 +106,7 @@ async function try_link_existing(
     const linked = await mongo.get_qbo_map_objects().findOne({ type: "vendor", qbo_id: existing.Id });
     if (linked) return null;
     if (!existing.TaxIdentifier || last4(existing.TaxIdentifier) !== last4(tin)) return null;
-    ilog(`[vnd] Linking ${get_subc_log_str(sc)} to existing ${get_vendor_log_str(existing)} (name + TIN last-4 match)`);
+    ilog(`[vnd] Linking ${label} to existing ${get_vendor_log_str(existing)} (name + TIN last-4 match)`);
     return existing;
 }
 
@@ -113,9 +114,9 @@ async function try_link_existing(
 // including when it was skipped (incomplete) or permanently rejected (recorded +
 // alerted). Throws only for transient failures, which the caller floors on.
 export async function process_subc(sc: subc_doc, ctx: subc_sync_ctx, from_sweep: boolean): Promise<void> {
-    const label = get_subc_log_str(sc);
-    const owner_id = get_owner_hres_id(sc);
-    const r = resolve_subc(sc, owner_id ? (ctx.owners.get(owner_id) ?? null) : null);
+    const owner = get_subc_owner(sc, ctx.owners);
+    const label = get_subc_log_str(sc, owner);
+    const r = resolve_subc(sc, owner);
     const payload = build_vendor_payload(r);
     const hash = vendor_hash(payload);
     const missing = missing_required_fields(r);
@@ -174,7 +175,7 @@ export async function process_subc(sc: subc_doc, ctx: subc_sync_ctx, from_sweep:
         } catch (err) {
             const existing =
                 err instanceof qbo_api_error && err.codes.includes(QBO_DUPLICATE_NAME)
-                    ? await try_link_existing(ctx.qbo, sc, payload.DisplayName!, r.tin)
+                    ? await try_link_existing(ctx.qbo, label, payload.DisplayName!, r.tin)
                     : null;
             if (!existing) throw err;
             vendor = await update_vendor(ctx.qbo, existing.Id, existing.SyncToken, payload);
@@ -297,7 +298,7 @@ export async function update_vendors_from_subcs(qbo: qbo_client): Promise<void> 
 
     for (let i = 0; i < list.length; ++i) {
         const c = list[i];
-        const label = get_subc_log_str(c.subc);
+        const label = get_subc_log_str(c.subc, get_subc_owner(c.subc, ctx.owners));
         if (!c.from_sweep) ilog(`[vnd] Processing ${label} (${i + 1} of ${list.length})`);
         try {
             await process_subc(c.subc, ctx, c.from_sweep);
