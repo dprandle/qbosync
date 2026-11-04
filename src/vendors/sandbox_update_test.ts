@@ -255,6 +255,12 @@ async function run_contractor_matrix(stamp: string): Promise<void> {
                         DisplayName: name,
                         Vendor1099: true,
                         TaxIdentifier: tin,
+                        BillAddr: {
+                            Line1: "1 Test St",
+                            City: "Dallas",
+                            CountrySubDivisionCode: "TX",
+                            PostalCode: "75001",
+                        },
                         GivenName: person ? "Test" : "",
                         FamilyName: person ? "Vendor" : "",
                         CompanyName: company ? `qbosync test company ${stamp} ${rows.length + 1}` : "",
