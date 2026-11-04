@@ -236,8 +236,9 @@ async function test_hidden_field(ein_id: string): Promise<void> {
 }
 
 // Every combination of person name, company name and tax ID format, to work out exactly
-// what sets Contractor Type. "Unset" means left out of the create. Run on its own with
-// --contractor-matrix.
+// what sets Contractor Type. "Unset" means sent as an empty string, not left out, since a
+// missing field makes the dashboard look like personal information is missing. Run on its
+// own with --contractor-matrix.
 async function run_contractor_matrix(stamp: string): Promise<void> {
     heading("Creating one vendor per combination");
     const rows: matrix_row[] = [];
@@ -254,8 +255,9 @@ async function run_contractor_matrix(stamp: string): Promise<void> {
                         DisplayName: name,
                         Vendor1099: true,
                         TaxIdentifier: tin,
-                        ...(person ? { GivenName: "Test", FamilyName: "Vendor" } : {}),
-                        ...(company ? { CompanyName: `qbosync test company ${stamp} ${rows.length + 1}` } : {}),
+                        GivenName: person ? "Test" : "",
+                        FamilyName: person ? "Vendor" : "",
+                        CompanyName: company ? `qbosync test company ${stamp} ${rows.length + 1}` : "",
                     });
                     ilog(`  ID ${row.vendor.Id.padEnd(8)}${name}`);
                 } catch (err) {
