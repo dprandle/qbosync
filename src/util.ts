@@ -21,12 +21,6 @@ export async function ask_yes_no(question: string) {
     }
 }
 
-export async function wait_for_enter(prompt = "Press Enter when done"): Promise<void> {
-    const rl = readline.createInterface({ input, output });
-    await rl.question(`${prompt}: `);
-    rl.close();
-}
-
 // Pick one of `options` by number, or 0 for none. Returns the index or -1.
 export async function ask_choice(question: string, options: string[]): Promise<number> {
     const rl = readline.createInterface({ input, output });

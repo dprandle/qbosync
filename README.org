@@ -50,14 +50,14 @@ Optional =QBO_EXPECTED_REALM_ID= pins a deployment to one company (QBO's "realm"
 
 Every subcontractor gets one QBO vendor. Active subc → active vendor; archived subc → vendor =Active=false= (QBO can't delete vendors). Archived subcs that never had a vendor don't get one. Employees aren't synced; QuickBooks is only used for subcontractors.
 
-Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcontractor.cpp=): if the subc's matching =SC_ENTITY_FLAG_USE_OWNER_*= flag is set *and* the owner hresource exists, the owner's value is used; otherwise the subc's own. Docs missing =flags= get uber's default (=USE_OWNER_ALL=). =GivenName=, =FamilyName= and =TaxIdentifier= don't use the flags.
+Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcontractor.cpp=): if the subc's matching =SC_ENTITY_FLAG_USE_OWNER_*= flag is set *and* the owner hresource exists, the owner's value is used; otherwise the subc's own. Docs missing =flags= get uber's default (=USE_OWNER_ALL=). =GivenName=, =FamilyName= and =TaxIdentifier= don't use the flags. Multi Member LLC/Corp ignores =USE_OWNER_NAME= (uber disables it for them) and requires the subc's own name and EIN.
 
 | Vendor field                     | Source                                                                               |
 |----------------------------------+--------------------------------------------------------------------------------------|
 | =DisplayName=                    | owner "First Last" with =USE_OWNER_NAME=, else "First Last (Subc Name)"; subc name alone with no owner |
 | =PrintOnCheckName=               | owner "First Last" (=USE_OWNER_NAME=) or =subcontractor.name=                        |
-| =GivenName= / =FamilyName=       | owner first/last, whenever there's an owner                                          |
-| =CompanyName=                    | =subcontractor.name=; sent empty when =USE_OWNER_NAME= applies, to clear an old value |
+| =GivenName= / =FamilyName=       | owner first/last for Sole Proprietor/Single Member LLC; empty for Multi Member LLC/Corp |
+| =CompanyName=                    | =subcontractor.name=; empty for Sole Proprietor/Single Member LLC when =USE_OWNER_NAME= applies |
 | =TaxIdentifier=                  | owner =detail.SSN= for Sole Proprietor/Single Member LLC, else =subcontractor.ein=   |
 | =BillAddr=                       | mailing address, else physical (owner's =detail.mail/phys= with =USE_OWNER_ADDRESS=) |
 | =PrimaryEmailAddr=, =PrimaryPhone= | owner or subc, per =USE_OWNER_EMAIL= / =USE_OWNER_PHONE=                          |
@@ -66,7 +66,7 @@ Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcon
 
 Updates are sparse, so anything else on the vendor (terms, expense accounts, notes) stays under accounting's control. The fields above are owned by Uber: edits to them in QBO are overwritten on the subc's next change. An email QBO would reject (it needs an =@= and a dot) is left out rather than failing the vendor.
 
-The 1099 *Contractor Type* (Individual or Business) isn't in the documented Vendor API, so it has to be set by hand in QBO. =npm run preview_vendors= lists the type each vendor needs: Individual for Sole Proprietor/Single Member LLC, Business for Multi Member LLC/Corp.
+The 1099 *Contractor Type* (Individual or Business) isn't in the documented Vendor API. A sandbox test showed QBO works it out on create: Business takes an EIN and no person name, and anything else is Individual. That's why the name fields above go by classification, and why empty fields are sent rather than left out. Whether QBO recalculates it on update isn't confirmed, so =npm run preview_vendors= still lists the type each vendor needs for checking by hand.
 
 *Required fields:* name, a 9-digit TIN (there's no fallback between the SSN and EIN), street address, city, state and zip. An incomplete subc is skipped *without* flooring the cursor; filling in the missing data bumps the subc (or its owner) and the next delta pass picks it up. A linked vendor whose subc becomes incomplete is left as-is rather than blanked out (archiving still goes through). =npm run preview_vendors= shows what's missing for each subc.
 

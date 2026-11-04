@@ -110,14 +110,14 @@ function trim(s: string | undefined | null): string {
 // Name, email, phone and address follow uber's get_sc_* helpers: use the owner's value
 // when the matching USE_OWNER flag is set AND the owner hresource exists, otherwise the
 // subc's own value (even if the flag is set). Keep these in step with
-// sc/subcontractor.cpp. The person name fields and tin deliberately don't use the flags -
-// see resolve_subc.
+// sc/subcontractor.cpp. The vendor's name fields and tin go by business classification
+// instead - see resolve_subc.
 export type resolved_subc = {
     display_name: string;
     name: string; // the payee name, per USE_OWNER_NAME
-    given_name: string; // always the owner's, whatever the flag; empty with no owner
+    given_name: string;
     family_name: string;
-    name_from_owner: boolean;
+    company_name: string;
     tin: string; // digits only
     tin_from_owner: boolean; // owner SSN vs the subc's own EIN, per entity type
     email: string;
@@ -144,12 +144,14 @@ export function resolve_subc(sc: subc_doc, owner: hresource_doc | null): resolve
     const flags = subc_flags(sc);
     const use = (flag: number) => (flags & flag) !== 0 && owner !== null;
 
-    const name_from_owner = use(SC_ENTITY_FLAG_USE_OWNER_NAME);
-
     // By business classification, not USE_OWNER_SSN: a single member LLC can have an EIN
-    // on file but still reports under the owner's SSN. There's no fallback to the EIN,
-    // so a sole proprietor without an owner SSN shows up as missing its tax id.
+    // on file but still reports under the owner's SSN. There's no fallback between the
+    // two, so a subc without the one it needs shows up as missing its tax id.
     const tin_from_owner = (sc.entity_type ?? SC_ENTITY_TYPE_SOLE_PROPRIETER) === SC_ENTITY_TYPE_SOLE_PROPRIETER;
+
+    // Uber disables the name flag for Multi Member LLC/Corp, so a value left over on an
+    // older doc is ignored: those always use the subc's own name.
+    const name_from_owner = tin_from_owner && use(SC_ENTITY_FLAG_USE_OWNER_NAME);
 
     // get_sc_mail_address / get_sc_phys_address share the ADDRESS flag. The vendor
     // gets the mailing address (where the 1099 goes), falling back to physical when
@@ -159,19 +161,24 @@ export function resolve_subc(sc: subc_doc, owner: hresource_doc | null): resolve
         : { mail: sc.mail_address, phys: sc.phys_address };
     const address = trim(addr_src.mail?.street_addr1) ? addr_src.mail! : (addr_src.phys ?? EMPTY_ADDR);
 
-    const given_name = trim(owner?.first_name);
-    const family_name = trim(owner?.last_name);
+    const owner_first = trim(owner?.first_name);
+    const owner_last = trim(owner?.last_name);
 
     // name_first_last for the owner, same as get_sc_name(..., last_comma_first=false)
-    const owner_name = `${given_name} ${family_name}`.trim();
+    const owner_name = `${owner_first} ${owner_last}`.trim();
     const subc_name = trim(sc.name);
+
+    // QBO has no Contractor Type field; it works the type out from these. A person name
+    // makes a vendor Individual even with an EIN, so Business takes an EIN, a company name
+    // and no person name.
+    const is_individual = tin_from_owner;
 
     return {
         display_name: build_display_name(owner_name, name_from_owner ? "" : subc_name),
         name: name_from_owner ? owner_name : subc_name,
-        given_name,
-        family_name,
-        name_from_owner,
+        given_name: is_individual ? owner_first : "",
+        family_name: is_individual ? owner_last : "",
+        company_name: name_from_owner ? "" : subc_name,
         tin: (tin_from_owner ? (owner?.detail?.SSN ?? "") : sc.ein).replace(/\D/g, ""),
         tin_from_owner,
         email: trim(use(SC_ENTITY_FLAG_USE_OWNER_EMAIL) ? owner!.email : sc.email),
@@ -192,7 +199,14 @@ export function resolve_subc(sc: subc_doc, owner: hresource_doc | null): resolve
 // pass picks it up then.
 export function missing_required_fields(r: resolved_subc): string[] {
     const missing: string[] = [];
-    if (!r.name) missing.push("name");
+    // QBO shows the vendor's personal info as missing without the name its type needs.
+    if (!r.tin_from_owner) {
+        if (!r.company_name) missing.push("company name");
+    } else if (!r.given_name && !r.family_name) {
+        missing.push("owner name");
+    } else if (!r.name) {
+        missing.push("name");
+    }
     const tin_label = r.tin_from_owner ? "owner SSN" : "EIN";
     if (r.tin.length !== 9) missing.push(r.tin ? `${tin_label} (${r.tin.length} digits, need 9)` : tin_label);
     if (!r.address.street_addr1) missing.push("street address");
@@ -233,10 +247,9 @@ function format_tin(digits: string, is_ssn: boolean): string {
 // The full set of vendor fields we own. Built in a fixed key order so vendor_hash is
 // stable. Fields we leave out (terms, accounts, notes) stay under accounting's control.
 export function build_vendor_payload(r: resolved_subc): qbo_vendor_write {
-    const payee = clean_display_name(r.name);
     const v: qbo_vendor_write = {
         DisplayName: clean_display_name(r.display_name),
-        PrintOnCheckName: payee.slice(0, 110),
+        PrintOnCheckName: clean_display_name(r.name).slice(0, 110),
         Active: r.active,
         Vendor1099: true,
         TaxIdentifier: format_tin(r.tin, r.tin_from_owner),
@@ -248,10 +261,11 @@ export function build_vendor_payload(r: resolved_subc): qbo_vendor_write {
             PostalCode: r.address.zip,
         },
     };
-    if (r.given_name) v.GivenName = clean_display_name(r.given_name).slice(0, 100);
-    if (r.family_name) v.FamilyName = clean_display_name(r.family_name).slice(0, 100);
-    // Sent empty rather than left out, since a sparse update wouldn't clear an old value.
-    v.CompanyName = r.name_from_owner ? "" : payee.slice(0, 100);
+    // Sent even when empty: a sparse update wouldn't clear an old value otherwise, and a
+    // leftover person name would make a Business vendor Individual.
+    v.GivenName = clean_display_name(r.given_name).slice(0, 100);
+    v.FamilyName = clean_display_name(r.family_name).slice(0, 100);
+    v.CompanyName = clean_display_name(r.company_name).slice(0, 100);
     if (is_valid_email(r.email)) v.PrimaryEmailAddr = { Address: r.email };
     if (r.phone) v.PrimaryPhone = { FreeFormNumber: r.phone };
     return v;

@@ -2,27 +2,46 @@ import "../global_setup";
 import { config } from "../config";
 import { get_connection } from "../qbo/auth";
 import { qbo_client, type qbo_entity } from "../qbo/client";
+import { make_ci_now, make_ci_not_archived } from "../uobj_common";
 import { type qbo_vendor, type qbo_vendor_write, get_vendor, update_vendor } from "./vendor_api";
-import { build_vendor_payload, type resolved_subc } from "./subc";
-import { ask_yes_no, ask_choice, wait_for_enter } from "../util";
+import {
+    type hresource_doc,
+    type subc_doc,
+    SC_ENTITY_FLAG_USE_OWNER_NAME,
+    SC_ENTITY_TYPE_SOLE_PROPRIETER,
+    build_vendor_payload,
+    resolve_subc,
+} from "./subc";
+import { last4 } from "./vendor_match";
+import { ask_yes_no, ask_choice } from "../util";
 
-// Throwaway test (npm run test_vendor_updates), sandbox only. Answers two questions the
-// Vendor docs don't settle:
+// Throwaway test (npm run test_vendor_updates), sandbox only. Answers what the Vendor docs
+// don't settle about updating an existing vendor:
 //   1. Does QBO honor sparse: true on vendors, or does it wipe the fields we don't send?
-//   2. Does QBO set the 1099 Contractor Type from the format of the tax ID?
+//   2. Do empty strings actually clear GivenName, FamilyName and CompanyName?
+//   3. Does QBO recalculate Contractor Type when those fields change?
+// Payloads come from the sync's own resolve_subc and build_vendor_payload, so this tests
+// what the first push really sends.
+//
 // Pass --contractor-matrix (npm run test_vendor_updates -- --contractor-matrix) to skip the
-// update tests and try every combination of name fields and tax ID format instead.
+// update tests and try every combination of name fields and tax ID format on new vendors.
+//
 // It creates its own test vendors with fake tax IDs and sets them inactive at the end. It
 // tells you when to look at something in the QuickBooks dashboard. Delete it once it has
 // answered these.
 
 const FAKE_SSN = "123-45-6781";
 const FAKE_EIN = "12-3456782";
-const FAKE_EIN_DIGITS_AFTER_UPDATE = "123456783";
-const FAKE_EIN_DIGITS_PERSON_ONLY = "123456784";
+
+// Mirrors SC_ENTITY_TYPE_LLC in uber, labelled Multi Member LLC/Corp.
+const SC_ENTITY_TYPE_MULTI_MEMBER = 1;
 
 // Change on every write, or don't describe the vendor.
 const IGNORED_FIELDS = new Set(["SyncToken", "MetaData", "domain", "sparse"]);
+
+// The name fields a payload sets, each of which should read back with the value we sent.
+// An empty string should read back as empty or missing.
+const CHECKED_NAME_FIELDS = ["DisplayName", "PrintOnCheckName", "GivenName", "FamilyName", "CompanyName"] as const;
 
 const CONTRACTOR_TYPES = ["Individual", "Business", "Not set or can't tell"];
 
@@ -96,26 +115,24 @@ async function run_update(name: string, id: string, write: qbo_vendor_write, exp
 async function ask_contractor_type(vendor: qbo_vendor, tin: string): Promise<string> {
     ilog(`\nACTION: in the QuickBooks dashboard, open vendor "${vendor.DisplayName}" (ID ${vendor.Id}).`);
     ilog(`        Its tax ID was sent as ${tin}. Look at Contractor Type under its personal details.`);
-    const i = await ask_choice("What does it show?", CONTRACTOR_TYPES);
+    ilog("        Also note whether its personal info shows as missing.");
+    const i = await ask_choice("What does Contractor Type show?", CONTRACTOR_TYPES);
     return i >= 0 ? CONTRACTOR_TYPES[i] : "Skipped";
 }
 
-async function create_test_vendors(stamp: string): Promise<{ ssn: qbo_vendor; ein: qbo_vendor }> {
-    const base = {
+// Starts as matrix row 1 (person name, company name, SSN). Every field the sync doesn't own
+// is something a full update would wipe.
+async function create_test_vendor(stamp: string): Promise<qbo_vendor> {
+    const terms = await qbo.query<qbo_entity>("Term", "", 1, 1);
+    if (terms.length === 0) ilog("No terms in this sandbox - TermRef won't be part of the test.");
+    return qbo.create<qbo_vendor>("Vendor", {
+        DisplayName: `qbosync test ${stamp}`,
         Vendor1099: true,
         GivenName: "Test",
         FamilyName: "Vendor",
         CompanyName: `qbosync test company ${stamp}`,
-        BillAddr: { Line1: "1 Test St", City: "Dallas", CountrySubDivisionCode: "TX", PostalCode: "75001" },
-    };
-    // Every field here is one the sync doesn't own, so each is something a full update
-    // would wipe.
-    const terms = await qbo.query<qbo_entity>("Term", "", 1, 1);
-    if (terms.length === 0) ilog("No terms in this sandbox - TermRef won't be part of the test.");
-    const ssn = await qbo.create<qbo_vendor>("Vendor", {
-        ...base,
-        DisplayName: `qbosync test SSN ${stamp}`,
         TaxIdentifier: FAKE_SSN,
+        BillAddr: { Line1: "1 Test St", City: "Dallas", CountrySubDivisionCode: "TX", PostalCode: "75001" },
         AcctNum: "TEST-ACCT-1",
         Mobile: { FreeFormNumber: "(555) 555-0101" },
         Fax: { FreeFormNumber: "(555) 555-0102" },
@@ -125,114 +142,71 @@ async function create_test_vendors(stamp: string): Promise<{ ssn: qbo_vendor; ei
         PrimaryPhone: { FreeFormNumber: "(555) 555-0104" },
         ...(terms[0] ? { TermRef: { value: terms[0].Id } } : {}),
     });
-    const ein = await qbo.create<qbo_vendor>("Vendor", {
-        ...base,
-        DisplayName: `qbosync test EIN ${stamp}`,
-        TaxIdentifier: FAKE_EIN,
-    });
-    return { ssn, ein };
 }
 
-async function test_contractor_type_on_create(ssn: qbo_vendor, ein: qbo_vendor): Promise<void> {
-    heading("Contractor Type on new vendors");
-    const from_ssn = await ask_contractor_type(ssn, FAKE_SSN);
-    const from_ein = await ask_contractor_type(ein, FAKE_EIN);
-    const follows = from_ssn === "Individual" && from_ein === "Business";
-    const verdict = follows ? "It follows the format." : "It doesn't clearly follow the format.";
-    record("Contractor Type on create", "INFO", `SSN format: ${from_ssn}, EIN format: ${from_ein}. ${verdict}`);
-}
-
-// Sends what a real linked vendor gets on its first push, changing the tax ID to an EIN the
-// way a single member LLC's could change.
-async function test_real_push(ssn_id: string, stamp: string): Promise<void> {
-    heading("A real sync payload, changing the tax ID from SSN to EIN format");
-    const resolved: resolved_subc = {
-        display_name: `qbosync test pushed ${stamp}`,
-        name: `qbosync test pushed ${stamp}`,
-        given_name: "Test",
-        family_name: "Vendor",
-        name_from_owner: false,
-        tin: FAKE_EIN_DIGITS_AFTER_UPDATE,
-        tin_from_owner: false,
+// What the sync would send for a subc of this classification with USE_OWNER_NAME set. Email
+// and phone are blank, so the payload leaves them out and they should survive.
+function build_real_payload(stamp: string, entity_type: number): qbo_vendor_write {
+    const addr = { street_addr1: "2 Test St", street_addr2: "", city: "Dallas", state: "TX", zip: "75001" };
+    const sc: subc_doc = {
+        _id: "test-subc",
+        name: `Test Company ${stamp}`,
+        ein: FAKE_EIN,
         email: "",
-        phone: "",
-        address: { street_addr1: "2 Test St", street_addr2: "", city: "Dallas", state: "TX", zip: "75001" },
-        active: true,
+        phone_number: "",
+        notes: "",
+        phys_address: addr,
+        mail_address: addr,
+        flags: SC_ENTITY_FLAG_USE_OWNER_NAME,
+        entity_type,
+        archived_info: make_ci_not_archived(),
+        last_update: make_ci_now(),
     };
-    const payload = build_vendor_payload(resolved);
-    const expected = [...Object.keys(payload), "FullyQualifiedName"];
-    const after = await run_update("Real sync payload", ssn_id, payload, expected);
-
-    const visible = (after.TaxIdentifier ?? "").slice(-4);
-    const stuck = visible === FAKE_EIN_DIGITS_AFTER_UPDATE.slice(-4);
-    record(
-        "Tax ID update",
-        stuck ? "PASS" : "FAIL",
-        `Tax ID update: vendor now shows ${after.TaxIdentifier ?? "nothing"}`
-    );
-
-    const type = await ask_contractor_type(after, payload.TaxIdentifier ?? "");
-    record("Contractor Type on update", "INFO", `After changing SSN format to EIN format, it shows: ${type}.`);
-}
-
-// What a linked vendor gets when USE_OWNER_NAME applies: an empty CompanyName should clear
-// the old value, not be refused or ignored.
-async function test_clear_company_name(id: string): Promise<void> {
-    heading("Clearing CompanyName by sending it empty");
-    const after = await run_update("Empty CompanyName update", id, { CompanyName: "" }, ["CompanyName"]);
-    const cleared = !after.CompanyName;
-    record(
-        "Clear CompanyName",
-        cleared ? "PASS" : "FAIL",
-        cleared ? "Clear CompanyName: the old value is gone" : `Clear CompanyName: still "${after.CompanyName}"`
-    );
-}
-
-// What a new vendor gets when USE_OWNER_NAME applies, for an LLC with an EIN. If QBO refuses
-// the empty CompanyName here, every new vendor like this would fail.
-async function test_create_person_only(stamp: string, created_ids: string[]): Promise<void> {
-    heading("Creating a vendor with an empty CompanyName, a person name and an EIN");
-    const resolved: resolved_subc = {
-        display_name: `qbosync test person ${stamp}`,
-        name: `qbosync test person ${stamp}`,
-        given_name: "Test",
-        family_name: "Person",
-        name_from_owner: true,
-        tin: FAKE_EIN_DIGITS_PERSON_ONLY,
-        tin_from_owner: false,
+    const owner: hresource_doc = {
+        _id: "test-owner",
+        first_name: "Test",
+        last_name: `Owner ${stamp}`,
         email: "",
-        phone: "",
-        address: { street_addr1: "3 Test St", street_addr2: "", city: "Dallas", state: "TX", zip: "75001" },
-        active: true,
+        phone_number: "",
+        detail: { SSN: FAKE_SSN },
+        archived_info: make_ci_not_archived(),
+        last_update: make_ci_now(),
     };
-    const payload = build_vendor_payload(resolved);
-    const vendor = await qbo.create<qbo_vendor>("Vendor", payload);
-    created_ids.push(vendor.Id);
-    record("Create with empty CompanyName", "PASS", `Create with empty CompanyName: accepted (ID ${vendor.Id})`);
-
-    const type = await ask_contractor_type(vendor, payload.TaxIdentifier ?? "");
-    record("Contractor Type, person only", "INFO", `Person name only with EIN format, it shows: ${type}.`);
+    return build_vendor_payload(resolve_subc(sc, owner));
 }
 
-// Optional, and the only step that needs a change made by hand: flip the setting in the
-// dashboard and see whether anything in the API response moves.
-async function test_hidden_field(ein_id: string): Promise<void> {
-    heading("Optional: is Contractor Type hiding in the API response?");
-    if (!(await ask_yes_no("Run this step? It needs one change in the dashboard"))) return;
-    const before = await read_vendor(ein_id);
-    ilog(`\nACTION: in the QuickBooks dashboard, open vendor "${before.DisplayName}" (ID ${ein_id}).`);
-    ilog("        Switch its Contractor Type to the other option and save.");
-    await wait_for_enter("Press Enter once it's saved");
-    const after = await read_vendor(ein_id);
-    if (after.SyncToken === before.SyncToken) {
-        record("Hidden field", "INFO", "The vendor's SyncToken didn't change, so the save didn't register. No answer.");
-        return;
+// Accepting a value isn't the same as storing it, so read the fields back. This is what
+// would catch QBO ignoring an empty GivenName and leaving a vendor Individual.
+function check_fields_stuck(name: string, after: qbo_vendor, payload: qbo_vendor_write): void {
+    const wrong: string[] = [];
+    for (const field of CHECKED_NAME_FIELDS) {
+        const [sent, got] = [payload[field] ?? "", after[field] ?? ""];
+        if (sent !== got) wrong.push(`${field} sent "${sent}", reads "${got}"`);
     }
-    const diffs = diff_vendors(before, after);
-    print_diffs(diffs);
-    if (diffs.length === 0)
-        record("Hidden field", "INFO", "Nothing in the API response changed, so the API doesn't return it.");
-    else record("Hidden field", "INFO", `Changed in the API response: ${diffs.map((d) => d.field).join(", ")}`);
+    if (last4(after.TaxIdentifier) !== last4(payload.TaxIdentifier)) {
+        wrong.push(`TaxIdentifier sent ***${last4(payload.TaxIdentifier)}, reads ${after.TaxIdentifier ?? "nothing"}`);
+    }
+    if (wrong.length === 0) record(name, "PASS", `${name}: names and tax ID read back as sent`);
+    else record(name, "FAIL", `${name}: ${wrong.join("; ")}`);
+}
+
+// Pushes one classification's payload to the vendor and returns the Contractor Type it ends
+// up with, or null if the push itself failed.
+async function test_push(label: string, id: string, payload: qbo_vendor_write, want: string): Promise<string | null> {
+    heading(`${label} payload: ${payload.DisplayName}`);
+    const expected = [...Object.keys(payload), "FullyQualifiedName"];
+    let after: qbo_vendor;
+    try {
+        after = await run_update(`${label} payload`, id, payload, expected);
+    } catch (err) {
+        record(`${label} payload`, "FAIL", `${label} payload: ${err instanceof Error ? err.message : err}`);
+        return null;
+    }
+    check_fields_stuck(`${label} fields`, after, payload);
+    const type = await ask_contractor_type(after, payload.TaxIdentifier ?? "");
+    const verdict = type === want ? "as it should" : `should be ${want}`;
+    record(`${label} Contractor Type`, "INFO", `${label} Contractor Type on update: ${type}, ${verdict}.`);
+    return type;
 }
 
 // Every combination of person name, company name and tax ID format, to work out exactly
@@ -321,8 +295,8 @@ function print_summary(): void {
     const failed = results.some((r) => r.status === "FAIL");
     ilog(
         failed
-            ? "\nAt least one update changed or was refused. Don't push to production until that's understood."
-            : "\nSparse updates left everything else alone. The first push won't wipe the fields we don't send."
+            ? "\nAt least one update changed something else, didn't stick or was refused. Don't push to production until that's understood."
+            : "\nUpdates left everything else alone and every field read back as sent. Check the Contractor Type lines above."
     );
     if (failed) process.exitCode = 1;
 }
@@ -344,33 +318,37 @@ async function main(): Promise<void> {
         return;
     }
 
-    heading("Creating test vendors");
-    const { ssn, ein } = await create_test_vendors(stamp);
-    ilog(`Created "${ssn.DisplayName}" (ID ${ssn.Id}) and "${ein.DisplayName}" (ID ${ein.Id})`);
-    const created_ids = [ssn.Id, ein.Id];
+    heading("Creating a test vendor");
+    const vendor = await create_test_vendor(stamp);
+    ilog(`Created "${vendor.DisplayName}" (ID ${vendor.Id})`);
 
     try {
-        await run_step("Contractor Type on create", () => test_contractor_type_on_create(ssn, ein));
-
         heading("Sparse update of a single field");
         await run_step("Single field update", () =>
-            run_update("Single field update", ssn.Id, { PrintOnCheckName: `Print ${stamp}` }, ["PrintOnCheckName"])
+            run_update("Single field update", vendor.Id, { PrintOnCheckName: `Print ${stamp}` }, ["PrintOnCheckName"])
         );
 
         heading("Archive: sending only Active: false");
-        await run_step("Archive update", () => run_update("Archive update", ssn.Id, { Active: false }, ["Active"]));
+        await run_step("Archive update", () => run_update("Archive update", vendor.Id, { Active: false }, ["Active"]));
 
         heading("Reactivate: sending only Active: true");
         await run_step("Reactivate update", () =>
-            run_update("Reactivate update", ssn.Id, { Active: true }, ["Active"])
+            run_update("Reactivate update", vendor.Id, { Active: true }, ["Active"])
         );
 
-        await run_step("Real sync payload", () => test_real_push(ssn.Id, stamp));
-        await run_step("Clear CompanyName", () => test_clear_company_name(ssn.Id));
-        await run_step("Create with empty CompanyName", () => test_create_person_only(stamp, created_ids));
-        await run_step("Hidden field", () => test_hidden_field(ein.Id));
+        const business = build_real_payload(stamp, SC_ENTITY_TYPE_MULTI_MEMBER);
+        const to_business = await test_push("Multi Member/Corp", vendor.Id, business, "Business");
+
+        const individual = build_real_payload(stamp, SC_ENTITY_TYPE_SOLE_PROPRIETER);
+        const to_individual = await test_push("Sole Prop", vendor.Id, individual, "Individual");
+
+        if (to_business === "Business" && to_individual === "Individual") {
+            record("Recalculates", "INFO", "Contractor Type recalculated on update in both directions.");
+        } else {
+            record("Recalculates", "INFO", "Contractor Type did not follow the update in both directions.");
+        }
     } finally {
-        await deactivate_test_vendors(created_ids);
+        await deactivate_test_vendors([vendor.Id]);
     }
     print_summary();
 }
