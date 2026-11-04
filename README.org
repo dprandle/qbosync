@@ -50,15 +50,15 @@ Optional =QBO_EXPECTED_REALM_ID= pins a deployment to one company (QBO's "realm"
 
 Every subcontractor gets one QBO vendor. Active subc → active vendor; archived subc → vendor =Active=false= (QBO can't delete vendors). Archived subcs that never had a vendor don't get one. Employees aren't synced; QuickBooks is only used for subcontractors.
 
-Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcontractor.cpp=): if the subc's matching =SC_ENTITY_FLAG_USE_OWNER_*= flag is set *and* the owner hresource exists, the owner's value is used; otherwise the subc's own. Docs missing =flags= get uber's default (=USE_OWNER_ALL=). =GivenName=, =FamilyName= and =TaxIdentifier= don't use the flags. Multi Member LLC/Corp ignores =USE_OWNER_NAME= (uber disables it for them) and requires the subc's own name and EIN.
+Most vendor fields are resolved the way uber's =get_sc_*= helpers do (=sc/subcontractor.cpp=): if the subc's matching =SC_ENTITY_FLAG_USE_OWNER_*= flag is set *and* the owner hresource exists, the owner's value is used; otherwise the subc's own. Docs missing =flags= get uber's default (=USE_OWNER_ALL=). =GivenName=, =FamilyName= and =TaxIdentifier= don't use the flags. Disregarded entities are Sole Proprietor and Single Member LLC (=is_disregarded_entity=). Every other entity type ignores =USE_OWNER_NAME= (uber disables it for them) and requires the subc's own name and EIN.
 
 | Vendor field                     | Source                                                                               |
 |----------------------------------+--------------------------------------------------------------------------------------|
 | =DisplayName=                    | owner "First Last" with =USE_OWNER_NAME=, else "First Last (Subc Name)"; subc name alone with no owner |
 | =PrintOnCheckName=               | owner "First Last" (=USE_OWNER_NAME=) or =subcontractor.name=                        |
-| =GivenName= / =FamilyName=       | owner first/last for Sole Proprietor/Single Member LLC; empty for Multi Member LLC/Corp |
-| =CompanyName=                    | =subcontractor.name=; empty for Sole Proprietor/Single Member LLC when =USE_OWNER_NAME= applies |
-| =TaxIdentifier=                  | owner =detail.SSN= for Sole Proprietor/Single Member LLC, else =subcontractor.ein=   |
+| =GivenName= / =FamilyName=       | owner first/last for disregarded entities; empty otherwise                           |
+| =CompanyName=                    | =subcontractor.name=; empty for disregarded entities when =USE_OWNER_NAME= applies   |
+| =TaxIdentifier=                  | owner =detail.SSN= for disregarded entities, else =subcontractor.ein=                |
 | =BillAddr=                       | mailing address, else physical (owner's =detail.mail/phys= with =USE_OWNER_ADDRESS=) |
 | =PrimaryEmailAddr=, =PrimaryPhone= | owner or subc, per =USE_OWNER_EMAIL= / =USE_OWNER_PHONE=                          |
 | =Vendor1099=                     | always =true=                                                                        |

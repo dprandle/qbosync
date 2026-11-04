@@ -5,16 +5,17 @@ import { type qbo_vendor_write } from "./vendor_api";
 
 // Mirrors sc_entity_flag in uber's sc/subcontractor.h.
 export const SC_ENTITY_FLAG_USE_OWNER_NAME = 1 << 0;
-export const SC_ENTITY_FLAG_USE_OWNER_SSN = 1 << 1;
+// 1 << 1 was USE_OWNER_SSN. The tax id now goes by entity type alone - see resolve_subc.
 export const SC_ENTITY_FLAG_USE_OWNER_EMAIL = 1 << 2;
 export const SC_ENTITY_FLAG_USE_OWNER_ADDRESS = 1 << 3;
 export const SC_ENTITY_FLAG_USE_OWNER_NOTES = 1 << 4;
 export const SC_ENTITY_FLAG_USE_OWNER_PHONE = 1 << 5;
 export const SC_ENTITY_FLAG_USE_OWNER_ALL = 0x3f;
 
-// Mirrors sc_entity_type, stored as an int. 0 is "Sole Proprietor/Single Member LLC";
-// anything else is "Multi Member LLC/Corp".
-export const SC_ENTITY_TYPE_SOLE_PROPRIETER = 0;
+// The first two values of sc_entity_type in uber's sc/subcontractor.h, stored as an int.
+// The later values (multi member LLC, partnership, corps, other) are all treated alike.
+const SC_ENTITY_TYPE_SOLE_PROPRIETOR = 0;
+const SC_ENTITY_TYPE_SINGLE_MEMBER_LLC = 1;
 
 // Mirrors sc_worker_flag.
 const SC_WORKER_FLAG_OWNER = 1 << 0;
@@ -85,6 +86,13 @@ export function subc_flags(sc: subc_doc): number {
     return sc.flags ?? SC_ENTITY_FLAG_USE_OWNER_ALL;
 }
 
+// Same as is_disregarded in uber's sc/subcontractor.cpp. A disregarded entity reports under
+// its owner. A doc with no entity_type gets uber's default, sole proprietor.
+export function is_disregarded_entity(sc: subc_doc): boolean {
+    const entity_type = sc.entity_type ?? SC_ENTITY_TYPE_SOLE_PROPRIETOR;
+    return entity_type === SC_ENTITY_TYPE_SOLE_PROPRIETOR || entity_type === SC_ENTITY_TYPE_SINGLE_MEMBER_LLC;
+}
+
 // get_sc_owner: the first worker carrying the OWNER flag.
 export function get_owner_hres_id(sc: subc_doc): string | null {
     const w = (sc.workers ?? []).find((w) => (w.flags & SC_WORKER_FLAG_OWNER) !== 0);
@@ -144,13 +152,13 @@ export function resolve_subc(sc: subc_doc, owner: hresource_doc | null): resolve
     const flags = subc_flags(sc);
     const use = (flag: number) => (flags & flag) !== 0 && owner !== null;
 
-    // By business classification, not USE_OWNER_SSN: a single member LLC can have an EIN
-    // on file but still reports under the owner's SSN. There's no fallback between the
-    // two, so a subc without the one it needs shows up as missing its tax id.
-    const tin_from_owner = (sc.entity_type ?? SC_ENTITY_TYPE_SOLE_PROPRIETER) === SC_ENTITY_TYPE_SOLE_PROPRIETER;
+    // By entity type alone: a single member LLC can have an EIN on file but still reports
+    // under the owner's SSN. There's no fallback between the two, so a subc without the one
+    // it needs shows up as missing its tax id.
+    const tin_from_owner = is_disregarded_entity(sc);
 
-    // Uber disables the name flag for Multi Member LLC/Corp, so a value left over on an
-    // older doc is ignored: those always use the subc's own name.
+    // Uber disables the name flag for entities that aren't disregarded, so a value left over
+    // on an older doc is ignored: those always use the subc's own name.
     const name_from_owner = tin_from_owner && use(SC_ENTITY_FLAG_USE_OWNER_NAME);
 
     // get_sc_mail_address / get_sc_phys_address share the ADDRESS flag. The vendor
