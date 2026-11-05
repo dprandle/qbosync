@@ -9,6 +9,7 @@
         "dev": "nodemon --watch src --ext ts --exec \"npm run build && node dist/index.js\"",
         "bootstrap_vendors": "npm run build && node dist/vendors/bootstrap.js",
         "preview_vendors": "npm run build && node dist/vendors/preview.js",
+        "relink_vendor": "npm run build && node dist/vendors/relink.js",
         "start": "npm run build && node dist/index.js",
         "reset": "npm run build && node dist/index.js --reset",
         "deploy": "tools/deploy.sh",
