@@ -14,7 +14,7 @@ import {
     redact_payload,
 } from "./subc";
 import { load_owners } from "./sync";
-import { match_vendor, last4 } from "./vendor_match";
+import { get_vendor_tin_status, last4 } from "./vendor_match";
 import { ask_yes_no } from "../util";
 
 // Manual correction (npm run relink_vendor -- "<correct name>" "<wrong name>"): a subc ended
@@ -99,7 +99,7 @@ async function main(): Promise<void> {
             const why = r.active ? `incomplete (missing ${missing.join(", ")})` : "archived";
             ilog(`[relink]   Push:       skipped, the subc is ${why}. The sync pushes on its next change.`);
         }
-        const tin = match_vendor(sc, owner, correct)?.tin ?? "unknown";
+        const tin = get_vendor_tin_status(sc, owner, correct);
         if (tin === "mismatch") {
             wlog(
                 `[relink] WARNING: the TIN on ${get_vendor_log_str(correct)} (***${last4(correct.TaxIdentifier)}) ` +

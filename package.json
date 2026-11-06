@@ -10,6 +10,7 @@
         "bootstrap_vendors": "npm run build && node dist/vendors/bootstrap.js",
         "preview_vendors": "npm run build && node dist/vendors/preview.js",
         "relink_vendor": "npm run build && node dist/vendors/relink.js",
+        "link_vendor": "npm run build && node dist/vendors/link.js",
         "start": "npm run build && node dist/index.js",
         "reset": "npm run build && node dist/index.js --reset",
         "deploy": "tools/deploy.sh",

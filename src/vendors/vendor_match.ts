@@ -84,8 +84,12 @@ function get_tin_status(v: qbo_vendor, ours: Set<string>): tin_status {
     return ours.has(theirs) ? "match" : "mismatch";
 }
 
+export function get_vendor_tin_status(sc: subc_doc, owner: hresource_doc | null, v: qbo_vendor): tin_status {
+    return get_tin_status(v, our_tin_last4s(sc, owner));
+}
+
 export function match_vendor(sc: subc_doc, owner: hresource_doc | null, v: qbo_vendor): vendor_match | null {
-    const tin = get_tin_status(v, our_tin_last4s(sc, owner));
+    const tin = get_vendor_tin_status(sc, owner, v);
     const owner_name = owner ? `${owner.first_name} ${owner.last_name}` : "";
     const owner_keys = norm_set(owner ? [owner_name, `${owner.last_name} ${owner.first_name}`] : []);
     const subc_keys = new Set([...owner_keys, ...norm_set([sc.name])]);
